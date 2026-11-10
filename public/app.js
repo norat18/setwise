@@ -56,7 +56,7 @@ function defaultState() {
     programs: [],
     programId: null, // the active program (mesocycle)
     active: null,
-    settings: { unit: 'kg', rest: 90, autoRest: true },
+    settings: { unit: 'kg', rest: 90, autoRest: true, keepAwake: true },
   };
 }
 
@@ -697,7 +697,7 @@ function viewLog() {
     <header class="log-head">
       <div>
         <input class="title-input" data-bind="active.name" value="${esc(a.name)}" aria-label="Workout name" autocomplete="off">
-        <div class="muted small"><span data-elapsed="${a.start}">${fmtClock((Date.now() - a.start) / 1000)}</span> · ${done}/${total} sets</div>
+        <div class="muted small"><span data-elapsed="${a.start}">${fmtClock((Date.now() - a.start) / 1000)}</span> · ${done}/${total} sets<span class="wake-badge"></span></div>
       </div>
       <button class="btn primary" data-act="finish">Finish</button>
     </header>
@@ -1012,6 +1012,8 @@ function viewSettings() {
         <select data-bind="settings.unit"><option value="kg" ${s.unit === 'kg' ? 'selected' : ''}>kg</option><option value="lb" ${s.unit === 'lb' ? 'selected' : ''}>lb</option></select></div>
       <div class="setting"><div><b>Default rest timer</b><p>Seconds between sets, unless a workout sets its own rest per exercise.</p></div>
         <input type="number" min="0" step="15" inputmode="numeric" data-bind="settings.rest" data-num value="${s.rest}"></div>
+      <div class="setting"><div><b>Keep screen on during workouts</b><p>Stops your phone locking while a workout is in progress.${'wakeLock' in navigator ? '' : ' Not supported by this browser — on iPhone, update to iOS 16.4 or later.'}</p></div>
+        <input type="checkbox" class="switch" data-bind="settings.keepAwake" ${s.keepAwake !== false ? 'checked' : ''} aria-label="Keep screen on during workouts"></div>
       <div class="setting"><div><b>Auto-start rest timer</b><p>When you tick off a set.</p></div>
         <input type="checkbox" class="switch" data-bind="settings.autoRest" ${s.autoRest ? 'checked' : ''} aria-label="Auto-start rest timer"></div>
     </div>
@@ -1139,7 +1141,7 @@ function viewCardioLog() {
     <header class="log-head">
       <div>
         <input class="title-input" data-bind="active.name" value="${esc(a.name)}" aria-label="Session name" autocomplete="off">
-        <div class="muted small">Cardio${goal ? ` · goal ${esc(goal)}` : ''}</div>
+        <div class="muted small">Cardio${goal ? ` · goal ${esc(goal)}` : ''}<span class="wake-badge"></span></div>
       </div>
       <button class="btn primary" data-act="finish">Finish</button>
     </header>
@@ -1716,7 +1718,37 @@ function render() {
     ? `<a class="resume" href="#/log"><span class="grow">${esc(state.active.name || 'Workout')} in progress</span><span data-elapsed="${state.active.start}">${fmtClock((Date.now() - state.active.start) / 1000)}</span><span>Resume ›</span></a>`
     : '';
   renderRest();
+  syncWakeLock();
 }
+
+// ---------- Keep the screen on during a workout (Screen Wake Lock API) ----------
+let wakeLock = null, wakePending = false;
+const wantWake = () => !!state.active && state.settings.keepAwake !== false && document.visibilityState === 'visible';
+async function syncWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  if (wantWake() && !wakeLock && !wakePending) {
+    wakePending = true;
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      if (wantWake()) {
+        wakeLock = lock;
+        lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; updateWakeBadge(); });
+      } else lock.release().catch(() => {});
+    } catch (e) { /* not allowed right now (e.g. low power mode); retried on the next tap */ }
+    wakePending = false;
+  } else if (!wantWake() && wakeLock) {
+    const lock = wakeLock; wakeLock = null;
+    lock.release().catch(() => {});
+  }
+  updateWakeBadge();
+}
+function updateWakeBadge() {
+  $$('.wake-badge').forEach(el => { el.textContent = wakeLock ? ' · ☀︎ screen on' : ''; });
+}
+// The browser drops the lock whenever the app is hidden; take it back when you return.
+document.addEventListener('visibilitychange', syncWakeLock);
+// Some browsers only grant it after a tap — retry on the next touch if it isn't held yet.
+document.addEventListener('pointerdown', () => { if (wantWake() && !wakeLock) syncWakeLock(); }, { passive: true });
 
 let lastRoute = '';
 window.addEventListener('hashchange', () => {
