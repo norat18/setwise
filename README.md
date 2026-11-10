@@ -2,7 +2,7 @@
 
 A free, simple workout tracker that runs in the browser. No account, no backend — each person's data stays in their own browser.
 
-**Live:** https://setwise.lease-reader.workers.dev (Cloudflare) · https://setwise-c0ajl.web.app (Firebase)
+**Live:** https://setwiseapp.web.app · mirrors: https://setwise.lease-reader.workers.dev (Cloudflare), https://setwise-c0ajl.web.app
 
 ## Features
 - **Workouts** – build routines with sections (e.g. Warm Up / Weights), supersets, per-set reps and starting weights (`12,12,10,10`), RIR targets and rest time per exercise
