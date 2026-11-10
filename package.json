@@ -1,0 +1,16 @@
+{
+  "name": "setwise",
+  "private": true,
+  "devDependencies": {
+    "cf": "^1.0.0-beta.18",
+    "firebase-tools": "^15.35.0",
+    "wrangler": "^4.158.0"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "python3 -m http.server 5173 -d public",
+    "deploy:cloudflare": "cf deploy",
+    "deploy:firebase": "firebase deploy --only hosting",
+    "deploy": "npm run deploy:cloudflare && npm run deploy:firebase"
+  }
+}

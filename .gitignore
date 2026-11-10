@@ -1,0 +1,12 @@
+# Personal programs — never published
+private/
+
+# Dependencies and build output
+node_modules/
+.cloudflare/
+.firebase/
+firebase-debug.log
+
+# Local tooling
+.claude/
+.DS_Store
