@@ -393,3 +393,9 @@ a.badge { text-decoration: none; }
   .badge.cardio-badge { background: #3a1a26; color: #f28bab; }
 }
 .welcome { margin-bottom: 18px; border-color: var(--accent); }
+
+/* Backup reminder and status */
+.backup-nudge { margin: 14px 0 4px; border-color: var(--accent); }
+.backup-nudge p { margin: 4px 0 12px; }
+.backup-status { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 12px; }
+.backup-status > div { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 12px; background: var(--bg); }

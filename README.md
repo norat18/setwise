@@ -12,7 +12,7 @@ A free, simple workout tracker that runs in the browser. No account, no backend 
 - **History** – calendar and list of every session
 - **Progress** – weekly volume, sets per muscle group, per-exercise charts (est. 1RM, top weight, volume) and automatic PR detection
 - **Exercise library** – ~40 built-in exercises plus your own
-- **Your data** – stored in the browser (localStorage); export/import a JSON backup; share a single program as a file
+- **Your data** – stored in the browser (localStorage); export/import a JSON backup with a "last backup" date and a reminder after 3 sessions without one; asks the browser to protect the data from automatic cleanup; share a single program as a file
 - **Installable** – works offline and can be added to a phone's home screen (PWA)
 
 ## Project layout

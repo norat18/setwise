@@ -56,8 +56,32 @@ function defaultState() {
     programs: [],
     programId: null, // the active program (mesocycle)
     active: null,
+    lastBackup: null,   // when "Export backup" was last used
+    backupSnooze: null, // reminder hidden until this time
     settings: { unit: 'kg', rest: 90, autoRest: true, keepAwake: true },
   };
+}
+
+// ---------- Backups and storage protection ----------
+const BACKUP_AFTER = 3;          // remind after this many unbacked-up sessions
+const BACKUP_SNOOZE = 7 * DAY;
+const unbackedSessions = () => state.sessions.filter(x => !x.sample && (x.end || x.start) > (state.lastBackup || 0)).length;
+const backupDue = () => unbackedSessions() >= BACKUP_AFTER && !(state.backupSnooze > Date.now());
+function backupAgo() {
+  if (!state.lastBackup) return 'Never';
+  const days = Math.floor((Date.now() - state.lastBackup) / DAY);
+  return days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : `${days} days ago`;
+}
+// null = unknown/unsupported, true = protected from automatic cleanup, false = not (yet)
+let storagePersisted = null;
+async function protectStorage() {
+  if (!navigator.storage?.persisted) return;
+  try {
+    storagePersisted = await navigator.storage.persisted();
+    // Browsers grant this more readily once the app is installed or used regularly, so keep asking until it sticks.
+    if (!storagePersisted && navigator.storage.persist) storagePersisted = await navigator.storage.persist();
+  } catch (e) { /* leave as is */ }
+  if (parseRoute().name === 'settings') render();
 }
 
 function load() {
@@ -376,6 +400,11 @@ function viewToday() {
     </div>`}
     <div class="muted small">${fmtDate(now, { weekday: 'long', month: 'long', day: 'numeric' })}</div>
     <h1>${greeting}</h1>
+    ${backupDue() ? `<div class="card backup-nudge">
+      <b>Back up your workouts</b>
+      <p class="muted small">${plural(unbackedSessions(), 'session')} since your last backup (${backupAgo().toLowerCase()}). Your data only lives on this device, so save a copy somewhere safe, like Files or iCloud Drive.</p>
+      <div class="btn-row"><button class="btn primary" data-act="export">Back up now</button><button class="btn ghost" data-act="backup-later">Remind me later</button></div>
+    </div>` : ''}
 
     <div class="stats" style="margin-top:16px">
       <div class="stat"><b>${week.length}</b><span>workouts this week</span></div>
@@ -1022,6 +1051,12 @@ function viewSettings() {
       <div class="section-head"><h2>Your data</h2></div>
       <div class="card">
         <p class="muted small" style="margin-top:0">Everything is stored in this browser on this device — there's no account and nothing is sent anywhere. Export a backup regularly, or to move to another device. Import accepts a backup or a shared program file.</p>
+        <div class="backup-status">
+          <div><span class="muted small">Last backup</span><b>${backupAgo()}</b>${state.lastBackup ? `<span class="muted small">${fmtDate(state.lastBackup, { month: 'short', day: 'numeric', year: 'numeric' })}</span>` : ''}</div>
+          <div><span class="muted small">Not backed up</span><b>${plural(unbackedSessions(), 'session')}</b></div>
+        </div>
+        ${storagePersisted === true ? `<p class="muted small">✓ This browser has agreed to keep Setwise's data and won't clear it automatically to free up space. Clearing site data or deleting the app still erases it.</p>`
+          : storagePersisted === false ? `<p class="muted small">This browser may clear Setwise's data if it runs low on space or the app goes unused. Adding it to your home screen helps, and backups keep you safe either way.</p>` : ''}
         <div class="btn-row">
           <button class="btn" data-act="export">Export backup</button>
           <button class="btn" data-act="import">Import file</button>
@@ -1131,6 +1166,7 @@ function finishCardio() {
   state.sessions.push(session);
   state.active = null;
   save();
+  if (!storagePersisted) protectStorage();
   location.hash = '#/history/' + session.id;
   toast(`${c.type} logged — ${minutes} min. Nice work!`);
 }
@@ -1192,6 +1228,7 @@ function finishWorkout() {
   state.sessions.push(session);
   state.active = null;
   save();
+  if (!storagePersisted) protectStorage();
   location.hash = '#/history/' + session.id;
   toast(prCount(session) ? `Workout saved — PRs on ${plural(prCount(session), 'exercise')}! 🏆` : 'Workout saved. Nice work!');
 }
@@ -1484,7 +1521,10 @@ const actions = {
     a.download = `setwise-backup-${dayKey(Date.now())}.json`;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    state.lastBackup = Date.now(); state.backupSnooze = null;
+    save(); render(); toast('Backup saved: keep the file somewhere safe');
   },
+  'backup-later': () => { state.backupSnooze = Date.now() + BACKUP_SNOOZE; save(); render(); },
   import: () => $('#import-file').click(),
   'prog-export': el => {
     const p = state.programs.find(p => p.id === el.dataset.id);
@@ -1690,7 +1730,7 @@ async function importFile(file) {
     if (!Array.isArray(data.exercises) || !Array.isArray(data.templates) || !Array.isArray(data.sessions)) throw new Error('shape');
     if (!confirm(`Replace your current data with this backup (${plural(data.sessions.length, 'workout')})?`)) return;
     const d = defaultState();
-    state = { ...d, welcomed: true, imported: data.imported || [], exercises: data.exercises, templates: data.templates, sessions: data.sessions, programs: Array.isArray(data.programs) ? data.programs : [], programId: data.programId || null, active: data.active || null, settings: { ...d.settings, ...(data.settings || {}) } };
+    state = { ...d, welcomed: true, imported: data.imported || [], exercises: data.exercises, templates: data.templates, sessions: data.sessions, programs: Array.isArray(data.programs) ? data.programs : [], programId: data.programId || null, active: data.active || null, lastBackup: Date.parse(data.exportedAt) || Date.now(), settings: { ...d.settings, ...(data.settings || {}) } };
     save(); render(); toast('Backup imported');
   } catch (err) {
     toast('That file isn’t a Setwise backup');
@@ -1775,7 +1815,7 @@ window.addEventListener('storage', e => { if (e.key === STORE_KEY) { state = loa
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-navigator.storage?.persist?.().catch(() => {});
+protectStorage();
 
 save();
 lastRoute = (() => { const { name, arg } = parseRoute(); return name + '/' + (arg || ''); })();
