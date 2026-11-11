@@ -1,41 +1,19 @@
-# Deploys the app to Cloudflare and Firebase on every push to main.
-# Pull requests only get a build check (no secrets, nothing deployed).
-name: Deploy
+# Deploys the app to Firebase Hosting on every push to main.
+# Cloudflare deploys separately through Workers Builds (connected in the Cloudflare dashboard).
+name: Deploy to Firebase
 
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-${{ github.ref }}
+  group: deploy-firebase
   cancel-in-progress: false
 
 jobs:
-  cloudflare:
-    name: Cloudflare Workers
-    runs-on: ubuntu-latest
-    env:
-      CF_SEND_TELEMETRY: "false"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx cf build --mode production
-      - run: npx cf deploy --prebuilt --mode production --dry-run
-      - if: github.event_name != 'pull_request'
-        run: npx cf deploy --prebuilt --mode production
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
   firebase:
     name: Firebase Hosting
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
