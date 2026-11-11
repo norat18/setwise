@@ -15,7 +15,9 @@
 // A Firebase web config is public by design; access is controlled by the Firestore rules.
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyDao8B_qxBZrNw7kHmqo1gw4zIapd8Y5ns',
-  authDomain: 'setwise-c0ajl.firebaseapp.com',
+  // Sign-in pages are served from the app's own address so Safari keeps the result
+  // (Firebase Hosting serves /__/auth/* on every site).
+  authDomain: location.hostname === 'setwiseapp.web.app' ? 'setwiseapp.web.app' : 'setwise-c0ajl.firebaseapp.com',
   projectId: 'setwise-c0ajl',
   storageBucket: 'setwise-c0ajl.firebasestorage.app',
   messagingSenderId: '1076657664425',
@@ -74,7 +76,7 @@ function authError(e) {
   if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return '';
   if (code === 'auth/network-request-failed') return 'No internet connection. Try again when you’re online.';
   if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') return 'Google sign-in isn’t turned on for Setwise yet.';
-  return 'Sign-in didn’t work. Please try again.';
+  return `Sign-in didn’t work (${code || e?.message || 'unknown error'}). Please try again.`;
 }
 
 let started = null;
@@ -212,7 +214,7 @@ function setSynced() {
 }
 function onSyncError(e) {
   syncState.phase = 'error';
-  syncState.error = e?.code === 'permission-denied' ? 'The cloud refused this account’s data. Try signing out and in again.' : 'Sync hit a problem. It will retry when you reopen the app.';
+  syncState.error = e?.code === 'permission-denied' ? 'The cloud refused this account’s data. Try signing out and in again.' : `Sync hit a problem (${e?.code || e?.message || 'unknown'}). It will retry when you reopen the app.`;
   refreshSyncUI();
 }
 
@@ -223,6 +225,9 @@ async function syncSignIn() {
   if (!fb) return;
   const provider = new fb.A.GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
+  // Home-screen apps can't receive a result from a pop-up window, so sign in within the app's own window there.
+  const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+  if (standalone) { syncState.phase = 'loading'; refreshSyncUI(); return fb.A.signInWithRedirect(fb.auth, provider); }
   try { await fb.A.signInWithPopup(fb.auth, provider); }
   catch (e) {
     if (['auth/popup-blocked', 'auth/operation-not-supported-in-this-environment'].includes(e.code)) return fb.A.signInWithRedirect(fb.auth, provider);
