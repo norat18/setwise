@@ -40,6 +40,15 @@ npm run deploy:cloudflare   # cf deploy → Workers static assets
 npm run deploy:firebase     # firebase deploy --only hosting
 npm run deploy              # both
 ```
+### Automatic deploys
+Every push to `main` deploys to both hosts via GitHub Actions (`.github/workflows/deploy.yml`); pull requests only run a Cloudflare build check. It can also be run by hand from the Actions tab. Repository secrets it needs:
+
+| Secret | What it is |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token from the "Edit Cloudflare Workers" template |
+| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID |
+| `FIREBASE_SERVICE_ACCOUNT` | Full JSON key of a service account for the Firebase project (Project settings → Service accounts → Generate new private key) |
+
 After changing app files, bump `CACHE` in `public/sw.js` so installed copies refresh their offline cache.
 
 ## Sharing programs
