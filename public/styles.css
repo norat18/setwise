@@ -399,3 +399,27 @@ a.badge { text-decoration: none; }
 .backup-nudge p { margin: 4px 0 12px; }
 .backup-status { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 12px; }
 .backup-status > div { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 12px; background: var(--bg); }
+
+/* Per-set RIR, warm-ups, plates, editing history */
+.grow { flex: 1; }
+.entry-foot { flex-wrap: wrap; }
+.set-row.with-rir { grid-template-columns: 26px 1fr 64px 50px 44px 40px; }
+.set-row.edit-row { grid-template-columns: 26px 1fr 1fr 1fr 36px; }
+.set-row.edit-row .icon-btn { width: 34px; height: 34px; }
+.warmups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
+.wu { border: 1px dashed var(--border); background: transparent; color: var(--text); border-radius: 99px; padding: 5px 10px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.wu.on { background: var(--accent-soft); border-style: solid; border-color: var(--accent); text-decoration: line-through; color: var(--muted); }
+.plate-viz { display: flex; align-items: center; height: 120px; margin: 6px 0 12px; padding: 0 8px; border-radius: 12px; background: var(--surface-2); }
+.plate-viz .sleeve { width: 44px; height: 10px; background: var(--muted); border-radius: 3px; }
+.plate-viz .plate { width: 26px; margin-left: 3px; border-radius: 5px; background: var(--accent); color: var(--on-accent); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; writing-mode: vertical-rl; }
+.plate-viz .collar { width: 8px; height: 26px; margin-left: 3px; background: var(--text); border-radius: 2px; }
+@media (max-width: 380px) {
+  .set-row.with-rir { grid-template-columns: 22px 1fr 56px 46px 40px 36px; gap: 5px; }
+}
+
+/* Moving to the main address, cloud sync */
+.move-card { margin: 14px 0 4px; border-color: var(--accent); }
+.move-card p { margin: 4px 0 12px; }
+.steps { margin: 8px 0 12px; padding-left: 20px; display: grid; gap: 12px; }
+.ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-err { color: var(--danger); margin: 10px 0 0; }

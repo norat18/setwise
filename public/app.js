@@ -58,7 +58,7 @@ function defaultState() {
     active: null,
     lastBackup: null,   // when "Export backup" was last used
     backupSnooze: null, // reminder hidden until this time
-    settings: { unit: 'kg', rest: 90, autoRest: true, keepAwake: true },
+    settings: { unit: 'kg', rest: 90, autoRest: true, keepAwake: true, logRir: false, bar: '' },
   };
 }
 
@@ -66,7 +66,8 @@ function defaultState() {
 const BACKUP_AFTER = 3;          // remind after this many unbacked-up sessions
 const BACKUP_SNOOZE = 7 * DAY;
 const unbackedSessions = () => state.sessions.filter(x => !x.sample && (x.end || x.start) > (state.lastBackup || 0)).length;
-const backupDue = () => unbackedSessions() >= BACKUP_AFTER && !(state.backupSnooze > Date.now());
+const syncTurnedOn = () => { try { return localStorage.getItem('setwise.sync') === '1'; } catch (e) { return false; } };
+const backupDue = () => unbackedSessions() >= BACKUP_AFTER && !(state.backupSnooze > Date.now()) && !syncTurnedOn();
 function backupAgo() {
   if (!state.lastBackup) return 'Never';
   const days = Math.floor((Date.now() - state.lastBackup) / DAY);
@@ -96,12 +97,119 @@ function load() {
   return defaultState();
 }
 
+// ---------- One home address ----------
+// Each web address keeps its own data, so everyone is steered to a single one.
+const DEV = location.hostname === 'localhost';
+const HOME = DEV ? 'http://localhost:5174' : 'https://setwiseapp.web.app';
+const OLD_HOMES = DEV ? ['http://localhost:5173'] : ['https://setwise.lease-reader.workers.dev', 'https://setwise-c0ajl.web.app', 'https://setwise-c0ajl.firebaseapp.com'];
+const isOldHome = () => OLD_HOMES.includes(location.origin);
+// Brand-new visitors to an old address go straight to the main one.
+const LEAVING = (() => {
+  try { if (isOldHome() && !DEV && !localStorage.getItem(STORE_KEY)) { location.replace(HOME + '/' + location.hash); return true; } } catch (e) { /* stay */ }
+  return false;
+})();
+
 let state = load();
 let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
-  catch (e) { toast('Could not save — browser storage is full or blocked'); }
+  catch (e) { toast('Could not save — browser storage is full or blocked'); return; }
+  if (typeof onLocalSave === 'function') onLocalSave(); // cloud sync (sync.js), when turned on
+}
+const hasOwnData = () => state.sessions.some(x => !x.sample) || state.programs.length > 0 || !!state.active;
+const tplSig = t => JSON.stringify([t.name, t.items]);
+/** Add anything from `inc` that isn't here yet. Nothing already here is overwritten. */
+function mergeInto(inc) {
+  const fresh = !hasOwnData();
+  const add = (key, sig = x => x.id, keep = () => true) => {
+    const ids = new Set(state[key].map(x => x.id)), sigs = new Set(state[key].map(sig));
+    let n = 0;
+    for (const x of inc[key] || []) if (x && keep(x) && !ids.has(x.id) && !sigs.has(sig(x))) { state[key].push(x); n++; }
+    return n;
+  };
+  const counts = {
+    exercises: add('exercises'),
+    templates: add('templates', tplSig),
+    programs: add('programs'),
+    sessions: add('sessions', x => x.id, x => !x.sample),
+  };
+  state.imported = [...new Set([...(state.imported || []), ...(inc.imported || [])])];
+  if (!state.programId && inc.programId) state.programId = inc.programId;
+  if (fresh && inc.settings) state.settings = { ...state.settings, ...inc.settings };
+  if (!state.active && inc.active) state.active = inc.active;
+  state.lastBackup = Math.max(state.lastBackup || 0, inc.lastBackup || 0) || null;
+  return counts;
+}
+
+/** Old address: send everything to the main address in a new tab. */
+function moveHome() {
+  const payload = JSON.parse(JSON.stringify({ app: 'setwise', exportedAt: new Date().toISOString(), ...state }));
+  const w = window.open(HOME + '/#/receive', '_blank');
+  if (!w) return moveFallback();
+  let ready = false;
+  const onMsg = e => {
+    if (e.origin !== HOME || !e.data) return;
+    if (e.data.type === 'setwise-ready') { ready = true; (e.source || w).postMessage({ type: 'setwise-transfer', data: payload }, HOME); }
+    if (e.data.type === 'setwise-received') {
+      removeEventListener('message', onMsg);
+      state.movedAt = Date.now(); save(); render();
+    }
+  };
+  addEventListener('message', onMsg);
+  setTimeout(() => { if (!ready) { removeEventListener('message', onMsg); moveFallback(); } }, 10000);
+}
+function moveFallback() {
+  openModal(`<div class="sheet" role="dialog" aria-modal="true" aria-label="Move your data">
+    <div class="sheet-head"><h2>Move your data</h2><button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button></div>
+    <p class="muted">It couldn't be moved automatically (this happens in apps added to the home screen). It takes two steps instead:</p>
+    <ol class="steps">
+      <li><b>Save a backup here.</b><br><button class="btn small" data-act="export" style="margin-top:6px">Export backup</button></li>
+      <li><b>Open the new address</b> and go to <b>Settings → Import file</b>, then choose the backup.<br><a class="btn small" href="${HOME}" target="_blank" rel="noopener" style="margin-top:6px">Open ${HOME.replace(/^https?:\/\//, '')}</a></li>
+    </ol>
+    <p class="muted small">Then add the new address to your home screen and remove the old one.</p>
+  </div>`);
+}
+/** Main address, opened by moveHome(): ask the old tab for its data and merge it in. */
+let pendingMove = null;
+function receiveMove() {
+  if (!window.opener) {
+    // Opened without a link back to the old address (some phones do this): explain the manual way.
+    openModal(`<div class="sheet" role="dialog" aria-modal="true" aria-label="Bring your data over">
+      <div class="sheet-head"><h2>Bring your data over</h2><button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button></div>
+      <p class="muted">Your data couldn't be sent over automatically. It takes two steps instead:</p>
+      <ol class="steps">
+        <li>On your old Setwise address, go to <b>Settings → Export backup</b>.</li>
+        <li>Come back here and import that file.<br><button class="btn small" data-act="import" style="margin-top:6px">Import file</button></li>
+      </ol>
+    </div>`);
+    return;
+  }
+  addEventListener('message', function onMsg(e) {
+    if (!OLD_HOMES.includes(e.origin) || e.data?.type !== 'setwise-transfer') return;
+    removeEventListener('message', onMsg);
+    pendingMove = { inc: e.data.data || {}, source: e.source, origin: e.origin };
+    const n = (pendingMove.inc.sessions || []).filter(x => !x.sample).length, pn = (pendingMove.inc.programs || []).length;
+    openModal(`<div class="sheet" role="dialog" aria-modal="true" aria-label="Bring your data over">
+      <div class="sheet-head"><h2>Bring your data over?</h2><button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button></div>
+      <p class="muted">${plural(n, 'workout')} and ${plural(pn, 'program')} from your old Setwise address will be added to anything already here.</p>
+      <div class="btn-row"><button class="btn primary" data-act="move-accept">Bring them over</button><button class="btn" data-act="close-modal">Cancel</button></div>
+    </div>`);
+  });
+  for (const o of OLD_HOMES) { try { window.opener.postMessage({ type: 'setwise-ready' }, o); } catch (e) { /* not that one */ } }
+}
+function moveCard() {
+  const host = HOME.replace(/^https?:\/\//, '');
+  if (state.movedAt) return `<div class="card move-card">
+      <b>Your data is at ${host}</b>
+      <p class="muted small">It was copied there on ${fmtDate(state.movedAt, { month: 'short', day: 'numeric' })}. Use that address from now on: anything you log here won't be copied over.</p>
+      <div class="btn-row"><a class="btn primary" href="${HOME}" target="_blank" rel="noopener">Open ${host}</a><button class="btn ghost" data-act="move-home">Copy again</button></div>
+    </div>`;
+  return `<div class="card move-card">
+      <b>Setwise has a new address</b>
+      <p class="muted small">Use <b>${host}</b> from now on${hasOwnData() ? '. Move your workouts there in one tap (they stay here too), then add the new address to your home screen' : ''}.</p>
+      <div class="btn-row">${hasOwnData() ? `<button class="btn primary" data-act="move-home">Move my data</button>` : ''}<a class="btn ${hasOwnData() ? 'ghost' : 'primary'}" href="${HOME}" target="_blank" rel="noopener">Open ${host}</a></div>
+    </div>`;
 }
 function saveSoon() { clearTimeout(saveTimer); saveTimer = setTimeout(save, 400); }
 
@@ -162,6 +270,93 @@ function computePRs(session) {
   return prs;
 }
 const prCount = s => new Set((s.prs || []).map(p => p.exerciseId)).size;
+/** Recompute PRs for every session (oldest first), e.g. after editing an old workout. */
+function recomputeAllPRs() {
+  [...state.sessions].sort((a, b) => a.start - b.start).forEach(x => { if (!x.cardio) x.prs = computePRs(x); });
+}
+
+// ---------- Plates and warm-ups ----------
+const PLATES = { kg: [25, 20, 15, 10, 5, 2.5, 1.25], lb: [45, 35, 25, 10, 5, 2.5] };
+const BARS = { kg: [20, 15, 10], lb: [45, 35, 15] };
+const fmtP = n => String(Math.round(n * 100) / 100);
+const barWeight = () => +state.settings.bar || BARS[unit()][0];
+const isBarbell = exId => exById(exId).equipment === 'Barbell';
+/** Plates for one side of the bar, largest first; `left` is weight that can't be made with standard plates. */
+function platesFor(total, bar) {
+  let side = (total - bar) / 2;
+  if (!(side >= 0)) return null;
+  const plates = [];
+  for (const p of PLATES[unit()]) while (side >= p - 1e-9) { plates.push(p); side -= p; }
+  return { plates, left: Math.round(side * 2 * 100) / 100 };
+}
+/** The heaviest weight planned or used for this exercise in the current workout. */
+function workingWeight(en) {
+  const prevTop = Math.max(0, ...lastSets(en.exerciseId).map(x => +x.w || 0));
+  const planned = Math.max(0, ...en.sets.map(x => Math.max(+x.w || 0, +x.tw || 0)));
+  return planned || prevTop;
+}
+function warmupsFor(en) {
+  const W = workingWeight(en);
+  const step = unit() === 'lb' ? 5 : 2.5;
+  const bar = isBarbell(en.exerciseId) ? barWeight() : 0;
+  const out = [];
+  if (bar && W > bar * 1.5) out.push({ w: bar, r: 10, done: false });
+  for (const [pct, r] of [[0.4, 5], [0.6, 3], [0.8, 2]]) {
+    const w = Math.round((W * pct) / step) * step;
+    if (w > bar && w < W && !out.some(x => x.w === w)) out.push({ w, r, done: false });
+  }
+  return out;
+}
+function plateBar(total) {
+  const res = platesFor(total, barWeight());
+  if (!total) return `<p class="muted small">Enter a weight to see the plates.</p>`;
+  if (!res) return `<p class="muted small">That's lighter than the bar (${fmtW(barWeight())} ${unit()}).</p>`;
+  const max = PLATES[unit()][0];
+  return `<div class="plate-viz" aria-hidden="true"><span class="sleeve"></span>${res.plates.map(p => `<span class="plate" style="height:${Math.round(34 + 66 * p / max)}%">${fmtP(p)}</span>`).join('')}<span class="collar"></span></div>
+    <p><b>Each side:</b> ${res.plates.length ? res.plates.map(fmtP).join(' + ') + ` ${unit()}` : 'no plates, just the bar'}</p>
+    ${res.left ? `<p class="muted small">${fmtW(res.left)} ${unit()} can't be made with standard plates. Closest: ${fmtW(total - res.left)} ${unit()}.</p>` : ''}`;
+}
+function openPlates(total) {
+  openModal(`<div class="sheet" role="dialog" aria-modal="true" aria-label="Plate calculator">
+    <div class="sheet-head"><h2>Plate calculator</h2><button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button></div>
+    <div class="row" style="gap:10px;margin:8px 0 12px">
+      <label class="field grow" style="margin:0"><span>Total weight (${unit()})</span><input id="plate-w" inputmode="decimal" value="${total ? fmtW(total) : ''}" autocomplete="off"></label>
+      <label class="field" style="margin:0"><span>Bar</span><select id="plate-bar">${BARS[unit()].map(b => `<option value="${b}" ${b === barWeight() ? 'selected' : ''}>${b} ${unit()}</option>`).join('')}</select></label>
+    </div>
+    <div id="plate-out">${plateBar(total)}</div>
+  </div>`);
+}
+
+// ---------- Editing a finished workout ----------
+let sedit = null; // { id, name, notes, entries } while editing a history entry
+function viewSessionEdit(s) {
+  return `
+    <a class="back" href="#/history">‹ History</a>
+    <h1>Edit workout</h1>
+    <div class="muted" style="margin-top:4px">${fmtDate(s.start, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })} · ${fmtTime(s.start)}</div>
+    <label class="field" style="margin-top:14px"><span>Name</span><input data-sedit="name" value="${esc(sedit.name)}" autocomplete="off"></label>
+    ${sedit.entries.map((en, ei) => `<section class="card entry">
+      <div class="entry-head"><b class="entry-name">${esc(exById(en.exerciseId).name)}</b>
+        <button class="icon-btn" data-act="sedit-ex-del" data-ei="${ei}" aria-label="Remove exercise">✕</button></div>
+      <div class="sets">
+        <div class="set-row edit-row set-head"><span>Set</span><span>${unit()}</span><span>Reps</span><span>RIR</span><span></span></div>
+        ${en.sets.map((x, si) => `<div class="set-row edit-row">
+          <span class="set-n">${si + 1}</span>
+          <input inputmode="decimal" data-sedit="${ei}.${si}.w" value="${x.w === '' ? '' : fmtW(x.w)}" aria-label="Weight, set ${si + 1}">
+          <input inputmode="numeric" data-sedit="${ei}.${si}.r" value="${x.r ?? ''}" aria-label="Reps, set ${si + 1}">
+          <input inputmode="numeric" data-sedit="${ei}.${si}.rir" value="${x.rir ?? ''}" placeholder="–" aria-label="RIR, set ${si + 1}">
+          <button class="icon-btn" data-act="sedit-set-del" data-ei="${ei}" data-si="${si}" aria-label="Delete set ${si + 1}">✕</button>
+        </div>`).join('')}
+      </div>
+      <div class="entry-foot"><button class="btn small ghost" data-act="sedit-set-add" data-ei="${ei}">+ Add set</button></div>
+    </section>`).join('') || `<div class="empty">No exercises left.</div>`}
+    <label class="field"><span>Notes</span><textarea data-sedit="notes" rows="3">${esc(sedit.notes)}</textarea></label>
+    <div class="btn-row" style="margin-top:14px">
+      <button class="btn primary" data-act="sedit-save">Save changes</button>
+      <button class="btn" data-act="sedit-cancel">Cancel</button>
+    </div>
+    <p class="muted small">PRs are recalculated when you save.</p>`;
+}
 const prLabel = p => p.type === 'weight' ? `Heaviest · ${fmtW(p.value)} ${unit()}` : p.type === 'e1rm' ? `Est. 1RM · ${fmtW(p.value)} ${unit()}` : `Most reps · ${p.value}`;
 
 function weekStreak() {
@@ -400,7 +595,8 @@ function viewToday() {
     </div>`}
     <div class="muted small">${fmtDate(now, { weekday: 'long', month: 'long', day: 'numeric' })}</div>
     <h1>${greeting}</h1>
-    ${backupDue() ? `<div class="card backup-nudge">
+    ${isOldHome() ? moveCard() : ''}
+    ${!isOldHome() && backupDue() ? `<div class="card backup-nudge">
       <b>Back up your workouts</b>
       <p class="muted small">${plural(unbackedSessions(), 'session')} since your last backup (${backupAgo().toLowerCase()}). Your data only lives on this device, so save a copy somewhere safe, like Files or iCloud Drive.</p>
       <div class="btn-row"><button class="btn primary" data-act="export">Back up now</button><button class="btn ghost" data-act="backup-later">Remind me later</button></div>
@@ -744,6 +940,9 @@ function entryCard(en, ei) {
   const n = state.active.entries.length;
   const targetReps = parseInt(en.target, 10);
   const h = en.hint || {};
+  const hasRirTarget = en.rir !== '' && en.rir != null;
+  const showRir = state.settings.logRir || hasRirTarget;
+  const rc = showRir ? 'with-rir' : '';
   return `<section class="card entry">
     <div class="entry-head">
       <a class="entry-name" href="#/progress/${encodeURIComponent(ex.id)}">${esc(ex.name)}</a>
@@ -761,17 +960,19 @@ function entryCard(en, ei) {
       if (ws.length && !prev.length) parts.push(`start ${esc(repsSummary(ws.map(fmtW)))} ${unit()}`);
       return parts.length ? `<div class="muted small">Target ${parts.join(' · ')}</div>` : '';
     })()}
+    ${(en.warmups || []).length ? `<div class="warmups"><span class="muted small">Warm-up</span>${en.warmups.map((x, wi) => `<button class="wu ${x.done ? 'on' : ''}" data-act="wu-toggle" data-ei="${ei}" data-wi="${wi}" aria-pressed="${x.done}">${fmtW(x.w)} × ${x.r}</button>`).join('')}</div>` : ''}
     <div class="sets">
-      <div class="set-row set-head"><span>Set</span><span>Last time</span><span>${unit()}</span><span>Reps</span><span></span></div>
+      <div class="set-row ${rc} set-head"><span>Set</span><span>Last time</span><span>${unit()}</span><span>Reps</span>${showRir ? '<span>RIR</span>' : ''}<span></span></div>
       ${en.sets.map((s, si) => {
         const p = prev[si] || prev[prev.length - 1];
         const wPh = p ? fmtW(suggestW(p.w, h)) : (s.tw !== '' && s.tw != null ? fmtW(suggestW(+s.tw, h)) : '');
         const rPh = p ? p.r + (h.rAdd || 0) : (parseInt(s.tr, 10) || targetReps || '');
-        return `<div class="set-row ${s.done ? 'done' : ''}">
+        return `<div class="set-row ${rc} ${s.done ? 'done' : ''}">
           <span class="set-n">${si + 1}</span>
           <span class="prev">${prev[si] ? `${fmtW(prev[si].w)} × ${prev[si].r}` : '—'}</span>
           <input inputmode="decimal" data-set="${ei}.${si}.w" value="${s.w === '' ? '' : fmtW(s.w)}" placeholder="${wPh}" aria-label="Weight, set ${si + 1}">
           <input inputmode="numeric" data-set="${ei}.${si}.r" value="${s.r}" placeholder="${rPh}" aria-label="Reps, set ${si + 1}">
+          ${showRir ? `<input inputmode="numeric" data-set="${ei}.${si}.rir" value="${s.rir ?? ''}" placeholder="${hasRirTarget ? esc(en.rir) : '–'}" aria-label="Reps in reserve, set ${si + 1}">` : ''}
           <button class="check ${s.done ? 'on' : ''}" data-act="toggle-set" data-ei="${ei}" data-si="${si}" aria-label="Mark set ${si + 1} done" aria-pressed="${s.done}">✓</button>
         </div>`;
       }).join('')}
@@ -779,6 +980,9 @@ function entryCard(en, ei) {
     <div class="entry-foot">
       <button class="btn small ghost" data-act="set-add" data-ei="${ei}">+ Add set</button>
       ${en.sets.length > 1 ? `<button class="btn small ghost" data-act="set-remove" data-ei="${ei}">− Remove set</button>` : ''}
+      <span class="grow"></span>
+      <button class="btn small ghost" data-act="wu-add" data-ei="${ei}">${(en.warmups || []).length ? 'Clear warm-up' : 'Warm-up'}</button>
+      ${isBarbell(en.exerciseId) ? `<button class="btn small ghost" data-act="plates" data-ei="${ei}">Plates</button>` : ''}
     </div>
   </section>`;
 }
@@ -856,6 +1060,7 @@ function viewSession(id) {
   const s = state.sessions.find(s => s.id === id);
   if (!s) return `<a class="back" href="#/history">‹ History</a><div class="empty">Workout not found.</div>`;
   const prSet = new Set((s.prs || []).map(p => p.exerciseId));
+  if (!s.cardio && sedit && sedit.id === s.id) return viewSessionEdit(s);
   if (s.cardio) {
     const c = s.cardio;
     const pace = c.distance && c.minutes ? c.minutes / c.distance : 0;
@@ -889,13 +1094,14 @@ function viewSession(id) {
     <div class="card" style="margin-top:16px">
       ${grouped(s.entries, en => `<div class="detail-ex">
         <div class="row between"><a href="#/progress/${encodeURIComponent(en.exerciseId)}"><b>${esc(exById(en.exerciseId).name)}</b></a>${prSet.has(en.exerciseId) ? '<span class="badge pr">PR</span>' : ''}</div>
-        <div class="detail-sets">${en.sets.map((x, i) => `<span class="n">${i + 1}</span><span>${x.w ? `${fmtW(x.w)} ${unit()} × ${x.r}` : `${x.r} reps`}</span><span class="e">${x.w && x.r ? `≈${fmtW(e1rm(x.w, x.r))} 1RM` : ''}</span>`).join('')}</div>
+        <div class="detail-sets">${en.sets.map((x, i) => `<span class="n">${i + 1}</span><span>${x.w ? `${fmtW(x.w)} ${unit()} × ${x.r}` : `${x.r} reps`}${x.rir != null && x.rir !== '' ? ` <span class="muted">@ ${x.rir} RIR</span>` : ''}</span><span class="e">${x.w && x.r ? `≈${fmtW(e1rm(x.w, x.r))} 1RM` : ''}</span>`).join('')}</div>
       </div>`)}
     </div>
     ${s.notes ? `<div class="card" style="margin-top:10px"><div class="muted small" style="margin-bottom:4px">Notes</div>${esc(s.notes).replace(/\n/g, '<br>')}</div>` : ''}
     <div class="btn-row" style="margin-top:18px">
       <button class="btn primary" data-act="session-repeat" data-id="${s.id}">Repeat workout</button>
       <button class="btn" data-act="session-template" data-id="${s.id}">Save as workout</button>
+      <button class="btn" data-act="sedit-start" data-id="${s.id}">Edit</button>
     </div>
     <button class="btn block ghost danger" data-act="session-delete" data-id="${s.id}">Delete from history</button>
   `;
@@ -1036,6 +1242,7 @@ function viewSettings() {
   const hasSample = state.sessions.some(x => x.sample);
   return `
     <div class="page-head"><h1>Settings</h1></div>
+    ${isOldHome() ? moveCard() : ''}
     <div class="card">
       <div class="setting"><div><b>Weight unit</b><p>Labels only — existing numbers aren't converted.</p></div>
         <select data-bind="settings.unit"><option value="kg" ${s.unit === 'kg' ? 'selected' : ''}>kg</option><option value="lb" ${s.unit === 'lb' ? 'selected' : ''}>lb</option></select></div>
@@ -1043,14 +1250,17 @@ function viewSettings() {
         <input type="number" min="0" step="15" inputmode="numeric" data-bind="settings.rest" data-num value="${s.rest}"></div>
       <div class="setting"><div><b>Keep screen on during workouts</b><p>Stops your phone locking while a workout is in progress.${'wakeLock' in navigator ? '' : ' Not supported by this browser — on iPhone, update to iOS 16.4 or later.'}</p></div>
         <input type="checkbox" class="switch" data-bind="settings.keepAwake" ${s.keepAwake !== false ? 'checked' : ''} aria-label="Keep screen on during workouts"></div>
+      <div class="setting"><div><b>Log RIR for every exercise</b><p>Adds a reps-in-reserve column to each set. Exercises with an RIR target always show it.</p></div>
+        <input type="checkbox" class="switch" data-bind="settings.logRir" ${s.logRir ? 'checked' : ''} aria-label="Log RIR for every exercise"></div>
       <div class="setting"><div><b>Auto-start rest timer</b><p>When you tick off a set.</p></div>
         <input type="checkbox" class="switch" data-bind="settings.autoRest" ${s.autoRest ? 'checked' : ''} aria-label="Auto-start rest timer"></div>
     </div>
 
+    ${typeof syncCard === 'function' ? `<div class="section"><div class="section-head"><h2>Sync across devices</h2></div>${syncCard()}</div>` : ''}
     <div class="section">
       <div class="section-head"><h2>Your data</h2></div>
       <div class="card">
-        <p class="muted small" style="margin-top:0">Everything is stored in this browser on this device — there's no account and nothing is sent anywhere. Export a backup regularly, or to move to another device. Import accepts a backup or a shared program file.</p>
+        <p class="muted small" style="margin-top:0">${syncTurnedOn() ? 'Stored in this browser and synced to your account (see above).' : 'Everything is stored in this browser on this device, and nothing is sent anywhere unless you turn on sync.'} Export a backup to keep your own copy or to move to another device. Import accepts a backup or a shared program file.</p>
         <div class="backup-status">
           <div><span class="muted small">Last backup</span><b>${backupAgo()}</b>${state.lastBackup ? `<span class="muted small">${fmtDate(state.lastBackup, { month: 'short', day: 'numeric', year: 'numeric' })}</span>` : ''}</div>
           <div><span class="muted small">Not backed up</span><b>${plural(unbackedSessions(), 'session')}</b></div>
@@ -1222,7 +1432,7 @@ function finishWorkout() {
     start: a.start,
     end: Date.now(),
     notes: a.notes.trim(),
-    entries: kept.map(en => ({ exerciseId: en.exerciseId, ...(en.section ? { section: en.section } : {}), ...(en.link ? { link: true } : {}), sets: en.sets.map(s => ({ w: +s.w || 0, r: +s.r || 0 })) })),
+    entries: kept.map(en => ({ exerciseId: en.exerciseId, ...(en.section ? { section: en.section } : {}), ...(en.link ? { link: true } : {}), sets: en.sets.map(s => ({ w: +s.w || 0, r: +s.r || 0, ...(s.rir !== '' && s.rir != null && !isNaN(+s.rir) ? { rir: +s.rir } : {}) })) })),
   };
   session.prs = computePRs(session);
   state.sessions.push(session);
@@ -1380,6 +1590,53 @@ const actions = {
     save(); render();
   },
   'set-remove': el => { state.active.entries[+el.dataset.ei].sets.pop(); save(); render(); },
+  'wu-add': el => {
+    const en = state.active.entries[+el.dataset.ei];
+    if ((en.warmups || []).length) { en.warmups = []; save(); render(); return; }
+    if (!workingWeight(en)) { toast('Enter your working weight first'); return; }
+    en.warmups = warmupsFor(en);
+    if (!en.warmups.length) toast('This weight is light enough to skip a warm-up');
+    save(); render();
+  },
+  'wu-toggle': el => { const x = state.active.entries[+el.dataset.ei].warmups[+el.dataset.wi]; x.done = !x.done; save(); render(); },
+  plates: el => {
+    const en = state.active.entries[+el.dataset.ei];
+    const next = en.sets.find(x => !x.done) || en.sets[en.sets.length - 1];
+    const ph = $(`[data-set="${el.dataset.ei}.${en.sets.indexOf(next)}.w"]`)?.placeholder;
+    openPlates(+next?.w || +ph || workingWeight(en) || 0);
+  },
+  'sedit-start': el => {
+    const x = state.sessions.find(z => z.id === el.dataset.id);
+    sedit = { id: x.id, name: x.name, notes: x.notes || '', entries: JSON.parse(JSON.stringify(x.entries)) };
+    render(); window.scrollTo(0, 0);
+  },
+  'sedit-cancel': () => { sedit = null; render(); },
+  'sedit-set-add': el => {
+    const sets = sedit.entries[+el.dataset.ei].sets;
+    const last = sets[sets.length - 1];
+    sets.push({ w: last ? last.w : '', r: last ? last.r : '' });
+    render();
+  },
+  'sedit-set-del': el => {
+    const en = sedit.entries[+el.dataset.ei];
+    en.sets.splice(+el.dataset.si, 1);
+    if (!en.sets.length) sedit.entries.splice(+el.dataset.ei, 1);
+    render();
+  },
+  'sedit-ex-del': el => { sedit.entries.splice(+el.dataset.ei, 1); render(); },
+  'sedit-save': () => {
+    const x = state.sessions.find(z => z.id === sedit.id);
+    const entries = sedit.entries
+      .map(en => ({ ...en, sets: en.sets.filter(t => +t.r > 0).map(t => ({ w: +t.w || 0, r: +t.r, ...(t.rir !== '' && t.rir != null && !isNaN(+t.rir) ? { rir: +t.rir } : {}) })) }))
+      .filter(en => en.sets.length);
+    if (!entries.length) { toast('Keep at least one set with reps, or delete the workout instead'); return; }
+    x.name = sedit.name.trim() || x.name;
+    x.notes = sedit.notes.trim();
+    x.entries = entries;
+    recomputeAllPRs();
+    sedit = null;
+    save(); render(); toast('Workout updated');
+  },
   'entry-move': el => { move(state.active.entries, +el.dataset.ei, +el.dataset.d); save(); render(); },
   'entry-remove': el => {
     const en = state.active.entries[+el.dataset.ei];
@@ -1524,6 +1781,24 @@ const actions = {
     state.lastBackup = Date.now(); state.backupSnooze = null;
     save(); render(); toast('Backup saved: keep the file somewhere safe');
   },
+  'move-home': () => moveHome(),
+  'import-merge': () => {
+    const c = mergeInto(pendingImport); pendingImport = null;
+    save(); closeModal(); render();
+    toast(`Added ${plural(c.sessions, 'workout')} and ${plural(c.programs, 'program')}`);
+  },
+  'import-replace': () => {
+    if (!confirm('Replace everything on this device with the backup? This can’t be undone.')) return;
+    const data = pendingImport; pendingImport = null; closeModal(); replaceWithBackup(data);
+  },
+  'move-accept': () => {
+    const { inc, source, origin } = pendingMove; pendingMove = null;
+    const c = mergeInto(inc);
+    state.welcomed = true;
+    save(); closeModal(); render();
+    try { source.postMessage({ type: 'setwise-received' }, origin); } catch (e) { /* old tab closed */ }
+    toast(`Moved ${plural(c.sessions, 'workout')} and ${plural(c.programs, 'program')}. Add this address to your home screen.`);
+  },
   'backup-later': () => { state.backupSnooze = Date.now() + BACKUP_SNOOZE; save(); render(); },
   import: () => $('#import-file').click(),
   'prog-export': el => {
@@ -1538,7 +1813,7 @@ const actions = {
     save(); toast('Sample workouts removed'); render();
   },
   reset: () => {
-    if (!confirm('Erase all workouts, templates and settings? Export a backup first if you might want them.')) return;
+    if (!confirm(`Erase all workouts, templates and settings?${typeof syncState !== 'undefined' && syncState.user ? ' Sync is on, so this also erases them from the cloud and your other devices.' : ''} Export a backup first if you might want them.`)) return;
     if (!confirm('Really erase everything?')) return;
     state = defaultState(); save(); location.hash = '#/today'; render();
   },
@@ -1585,9 +1860,20 @@ document.addEventListener('input', e => {
   if (el.dataset.set !== undefined && state.active) {
     const [ei, si, f] = el.dataset.set.split('.');
     const raw = el.value.replace(',', '.').trim();
-    const v = raw === '' ? '' : f === 'r' ? parseInt(raw, 10) : parseFloat(raw);
+    const v = raw === '' ? '' : f === 'w' ? parseFloat(raw) : parseInt(raw, 10);
     state.active.entries[+ei].sets[+si][f] = (v === '' || isNaN(v)) ? '' : v;
     saveSoon();
+  } else if (el.dataset.sedit !== undefined && sedit) {
+    const k = el.dataset.sedit;
+    if (k === 'name' || k === 'notes') sedit[k] = el.value;
+    else {
+      const [ei, si, f] = k.split('.');
+      const raw = el.value.replace(',', '.').trim();
+      const v = raw === '' ? '' : f === 'w' ? parseFloat(raw) : parseInt(raw, 10);
+      sedit.entries[+ei].sets[+si][f] = (v === '' || isNaN(v)) ? '' : v;
+    }
+  } else if (el.id === 'plate-w') {
+    $('#plate-out').innerHTML = plateBar(parseFloat(el.value.replace(',', '.')) || 0);
   } else if (el.dataset.pcardio !== undefined && pdraft && el.tagName === 'INPUT') {
     const [i, f] = el.dataset.pcardio.split('.');
     if (pdraft.cardio[+i]) pdraft.cardio[+i][f] = el.value;
@@ -1632,6 +1918,10 @@ document.addEventListener('change', e => {
     return;
   }
   if (el.dataset.bind && (el.type === 'checkbox' || el.tagName === 'SELECT')) { bind(el); render(); }
+  if (el.id === 'plate-bar') {
+    state.settings.bar = +el.value; save();
+    $('#plate-out').innerHTML = plateBar(parseFloat(($('#plate-w').value || '').replace(',', '.')) || 0);
+  }
   if (el.id === 'import-file' && el.files[0]) importFile(el.files[0]).finally(() => { el.value = ''; });
 });
 
@@ -1728,12 +2018,26 @@ async function importFile(file) {
       return;
     }
     if (!Array.isArray(data.exercises) || !Array.isArray(data.templates) || !Array.isArray(data.sessions)) throw new Error('shape');
-    if (!confirm(`Replace your current data with this backup (${plural(data.sessions.length, 'workout')})?`)) return;
+    if (hasOwnData()) {
+      pendingImport = data;
+      openModal(`<div class="sheet" role="dialog" aria-modal="true" aria-label="Import backup">
+        <div class="sheet-head"><h2>Import backup</h2><button class="icon-btn" data-act="close-modal" aria-label="Close">✕</button></div>
+        <p class="muted">This backup has ${plural(data.sessions.filter(x => !x.sample).length, 'workout')} and ${plural((data.programs || []).length, 'program')}. This device already has data.</p>
+        <div class="btn-row"><button class="btn primary" data-act="import-merge">Add to what's here</button><button class="btn danger" data-act="import-replace">Replace everything</button></div>
+      </div>`);
+      return;
+    }
+    replaceWithBackup(data);
+  } catch (err) {
+    toast('That file isn’t a Setwise backup');
+  }
+}
+let pendingImport = null;
+function replaceWithBackup(data) {
+  {
     const d = defaultState();
     state = { ...d, welcomed: true, imported: data.imported || [], exercises: data.exercises, templates: data.templates, sessions: data.sessions, programs: Array.isArray(data.programs) ? data.programs : [], programId: data.programId || null, active: data.active || null, lastBackup: Date.parse(data.exportedAt) || Date.now(), settings: { ...d.settings, ...(data.settings || {}) } };
     save(); render(); toast('Backup imported');
-  } catch (err) {
-    toast('That file isn’t a Setwise backup');
   }
 }
 
@@ -1795,6 +2099,7 @@ window.addEventListener('hashchange', () => {
   const { name, arg } = parseRoute();
   if (!(name === 'workouts' && arg)) draft = null;
   if (name !== 'program-edit') pdraft = null;
+  sedit = null;
   closeModal();
   render();
   const r = name + '/' + (arg || '');
@@ -1815,8 +2120,10 @@ window.addEventListener('storage', e => { if (e.key === STORE_KEY) { state = loa
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-protectStorage();
-
-save();
-lastRoute = (() => { const { name, arg } = parseRoute(); return name + '/' + (arg || ''); })();
-render();
+if (!LEAVING) {
+  protectStorage();
+  if (location.hash === '#/receive') { history.replaceState(null, '', '#/today'); receiveMove(); }
+  save();
+  lastRoute = (() => { const { name, arg } = parseRoute(); return name + '/' + (arg || ''); })();
+  render();
+}

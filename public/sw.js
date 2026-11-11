@@ -1,6 +1,6 @@
 // Network-first service worker: always fresh when online, still works offline.
-const CACHE = 'setwise-v8'; // bump to force old caches to clear
-const ASSETS = ['./', 'index.html', 'styles.css', 'data.js', 'app.js', 'manifest.webmanifest', 'icon.svg'];
+const CACHE = 'setwise-v9'; // bump to force old caches to clear
+const ASSETS = ['./', 'index.html', 'styles.css', 'data.js', 'app.js', 'sync.js', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
