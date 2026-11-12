@@ -122,20 +122,53 @@ function listen(uid) {
   }, onSyncError));
 }
 
+function adoptMain(m) {
+  MAIN_KEYS.forEach(k => { state[k] = m[k] ?? (k === 'imported' ? [] : null); });
+  state.settings = { ...defaultState().settings, ...(m.settings || {}) };
+}
+
+// ---------- Earlier versions (undo an update from another device) ----------
+const EARLIER_KEY = 'setwise.earlier';
+function earlierVersions() {
+  try { return JSON.parse(localStorage.getItem(EARLIER_KEY)) || []; } catch (e) { return []; }
+}
+function keepEarlierVersion(json) {
+  const list = earlierVersions().filter(v => v.json !== json);
+  list.unshift({ at: Date.now(), json });
+  try { localStorage.setItem(EARLIER_KEY, JSON.stringify(list.slice(0, 5))); } catch (e) { /* storage full */ }
+}
+function earlierCard() {
+  const list = earlierVersions();
+  if (!list.length) return '';
+  return `<details class="earlier"><summary class="small">Earlier versions on this device (${list.length})</summary>
+    <p class="muted small">Saved here each time a change from another device replaced your workouts, programs or settings. Restoring one sends it to all your devices.</p>
+    ${list.map((v, i) => {
+      let names = '';
+      try { names = (JSON.parse(v.json).templates || []).map(t => t.name).join(', '); } catch (e) { /* skip */ }
+      return `<div class="earlier-row"><div style="min-width:0"><b>${fmtDate(v.at, { month: 'short', day: 'numeric' })}, ${fmtTime(v.at)}</b><div class="muted small ellipsis">${esc(names || 'No workouts')}</div></div>
+        <button class="btn small" data-act="sync-restore" data-i="${i}">Restore</button></div>`;
+    }).join('')}
+  </details>`;
+}
+
 function applyRemoteMain(data) {
   if (!data?.json) return; // nothing in the cloud yet: the first push creates it
   const rh = hashStr(data.json);
   if (rh === meta.main) return;
   let remote;
   try { remote = JSON.parse(data.json); } catch (e) { return; }
-  const localUnsent = meta.main !== null && hashStr(mainJSON()) !== meta.main;
+  const localJ = mainJSON();
+  const localUnsent = meta.main !== null && hashStr(localJ) !== meta.main;
   applyingRemote = true;
+  // Whatever is about to be replaced is kept on this device so it can be restored.
+  if (!localUnsent && hashStr(localJ) !== rh) keepEarlierVersion(localJ);
   if (meta.main === null) {
-    // First sync on this device: keep what's here and add what's in the cloud.
-    mergeInto({ ...remote, sessions: [] });
+    // First sync on this device: the cloud copy wins, and anything only on this device is added to it.
+    const local = JSON.parse(localJ);
+    adoptMain(remote);
+    mergeInto({ ...local, sessions: [] });
   } else if (!localUnsent) {
-    MAIN_KEYS.forEach(k => { state[k] = remote[k] ?? (k === 'imported' ? [] : null); });
-    state.settings = { ...defaultState().settings, ...(remote.settings || {}) };
+    adoptMain(remote);
   } // else: this device changed it too and is about to send its version
   meta.main = rh;
   saveMeta(); save();
@@ -266,7 +299,7 @@ function syncCard() {
       : navigator.onLine === false ? 'Offline. Changes will sync when you’re back online.'
       : 'Syncing…';
     body = `<div class="row between" style="gap:10px"><div style="min-width:0"><b class="ellipsis">${esc(u.email || u.name || 'Signed in')}</b><div class="muted small">${status}</div></div>
-      <button class="btn small" data-act="sync-out">Sign out</button></div>${err}`;
+      <button class="btn small" data-act="sync-out">Sign out</button></div>${err}${earlierCard()}`;
   } else if (p === 'loading' || (p === 'off' && syncTurnedOn())) {
     body = `<p class="muted small" style="margin:0">Connecting…</p>`;
   } else {
@@ -282,6 +315,16 @@ function refreshSyncUI() {
 
 actions['sync-in'] = () => syncSignIn();
 actions['sync-out'] = () => syncSignOut();
+actions['sync-restore'] = el => {
+  const list = earlierVersions(), v = list[+el.dataset.i];
+  if (!v) return;
+  if (!confirm(`Restore the version from ${fmtDate(v.at, { month: 'short', day: 'numeric' })}, ${fmtTime(v.at)}? It replaces the workouts, programs and settings on all your devices. Your workout history isn't affected.`)) return;
+  keepEarlierVersion(mainJSON()); // so this can be undone too
+  adoptMain(JSON.parse(v.json));
+  try { localStorage.setItem(EARLIER_KEY, JSON.stringify(earlierVersions().filter(x => x.json !== v.json))); } catch (e) { /* ignore */ }
+  save(); render();
+  toast('Restored. Your other devices will update in a few seconds.');
+};
 addEventListener('online', () => { if (ready) pushNow(); refreshSyncUI(); });
 addEventListener('offline', refreshSyncUI);
 setInterval(() => { if (syncState.phase === 'synced') refreshSyncUI(); }, 30000);
