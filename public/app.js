@@ -252,7 +252,7 @@ function bestOf(sets) {
 /** PRs this session set compared with every earlier session. First-ever attempts don't count. */
 function computePRs(session) {
   const prs = [];
-  const ids = [...new Set(session.entries.map(e => e.exerciseId))];
+  const ids = [...new Set(session.entries.filter(e => !e.timed).map(e => e.exerciseId))];
   for (const id of ids) {
     const prior = state.sessions
       .filter(s => s.id !== session.id && s.start < session.start)
@@ -388,7 +388,11 @@ const CARDIO_TYPES = ['Run', 'Walk', 'Incline Walk', 'Bike', 'Spin', 'Row', 'Ell
 const INTENSITIES = ['Easy / Zone 2', 'Moderate', 'Hard', 'Intervals'];
 const distUnit = () => unit() === 'lb' ? 'mi' : 'km';
 const cardioOf = p => p.cardio || [];
-const liftsPerWeek = p => p.schedule.filter(Boolean).length;
+// A program either repeats one week (schedule) or has its own workouts each week (weekly[week-1]).
+const NO_DAYS = ['', '', '', '', '', '', ''];
+const schedFor = (p, week) => p.weekly ? (p.weekly[week - 1] || NO_DAYS) : p.schedule;
+const usesTemplate = (p, id) => p.schedule.includes(id) || !!p.weekly?.some(w => w.includes(id));
+const liftsPerWeek = p => p.weekly ? Math.max(0, ...p.weekly.map(w => w.filter(Boolean).length)) : p.schedule.filter(Boolean).length;
 const cardioPerWeek = p => cardioOf(p).filter(c => c?.type).length;
 const perWeekText = p => [liftsPerWeek(p) && `${liftsPerWeek(p)}× lifting`, cardioPerWeek(p) && `${cardioPerWeek(p)}× cardio`].filter(Boolean).join(' · ') || 'No training days';
 const cardioLabel = c => `${c.type}${c.minutes ? ` · ${c.minutes} min` : ''}`;
@@ -399,12 +403,12 @@ const slotName = s => s.kind === 'cardio' ? cardioLabel(s.cardio) : (tplById(s.t
 function programSlots(p) {
   const start = parseDay(p.start);
   const sd = dow0(start);
-  const days = [];
-  p.schedule.forEach((templateId, dow) => { if (templateId) days.push({ dow, kind: 'lift', templateId, off: (dow - sd + 7) % 7 }); });
-  cardioOf(p).forEach((cardio, dow) => { if (cardio?.type) days.push({ dow, kind: 'cardio', cardio, off: (dow - sd + 7) % 7 }); });
-  days.sort((a, b) => a.off - b.off || (a.kind === 'lift' ? -1 : 1));
   const out = [];
   for (let week = 1; week <= p.weeks; week++) {
+    const days = [];
+    schedFor(p, week).forEach((templateId, dow) => { if (templateId) days.push({ dow, kind: 'lift', templateId, off: (dow - sd + 7) % 7 }); });
+    cardioOf(p).forEach((cardio, dow) => { if (cardio?.type) days.push({ dow, kind: 'cardio', cardio, off: (dow - sd + 7) % 7 }); });
+    days.sort((a, b) => a.off - b.off || (a.kind === 'lift' ? -1 : 1));
     for (const d of days) out.push({ week, dow: d.dow, kind: d.kind, templateId: d.templateId, cardio: d.cardio, date: addDays(start, (week - 1) * 7 + d.off) });
   }
   return out;
@@ -434,7 +438,8 @@ function programUpNext(p) {
 
 function progDesc(p) {
   const parts = [];
-  if (p.progType === 'weight') parts.push(`+${fmtW(p.progAmount)} ${unit()} per week`);
+  if (p.weekly) parts.push('Different workouts each week');
+  else if (p.progType === 'weight') parts.push(`+${fmtW(p.progAmount)} ${unit()} per week`);
   else if (p.progType === 'reps') parts.push(`+${plural(+p.progAmount, 'rep')} per week`);
   else parts.push('Same targets each week');
   if (p.deload && p.weeks > 1) parts.push('deload in final week');
@@ -457,7 +462,7 @@ function startProgramSlot(pid, week, dow, kind = 'lift') {
     startCardio(c, { id: p.id, name: p.name, week, dow, kind: 'cardio', note: c.intensity ? `Target: ${c.intensity}` : '' });
     return;
   }
-  const t = p && tplById(p.schedule[dow]);
+  const t = p && tplById(schedFor(p, week)[dow]);
   if (!t) { toast('That workout no longer exists — edit the program'); return; }
   const deload = isDeloadWeek(p, week);
   const amt = +p.progAmount || 0;
@@ -486,7 +491,9 @@ function setTargets(it, n) {
   const reps = parseList(it.reps), ws = parseList(it.weight);
   return Array.from({ length: n }, (_, i) => ({ tr: pick(reps, i), tw: ws.length ? (parseFloat(pick(ws, i)) || '') : '' }));
 }
-const itemExtra = (it, n, reps = it.reps) => ({ section: it.section || '', link: !!it.link, rir: it.rir ?? '', rest: it.rest ?? '', targets: setTargets({ ...it, reps }, n) });
+const itemExtra = (it, n, reps = it.reps) => ({ section: it.section || '', link: !!it.link, rir: it.rir ?? '', rest: it.rest ?? '', timed: !!it.timed, note: it.note || '', targets: setTargets({ ...it, reps }, n) });
+/** Timed sets store seconds in the reps field. */
+const fmtSecs = n => { n = +n || 0; return n >= 60 ? (n % 60 ? `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')} min` : `${n / 60} min`) : `${n} sec`; };
 // Rest between sets: per exercise in a workout, falling back to the default in Settings.
 const REST_OPTIONS = [0, 30, 45, 60, 75, 90, 120, 150, 180, 240, 300];
 const restLabel = sec => +sec === 0 ? 'No rest' : fmtClock(+sec);
@@ -696,9 +703,12 @@ function newProgramDraft() {
 }
 function programSummary(d) {
   const weeks = Math.max(1, Math.min(26, parseInt(d.weeks, 10) || 1));
-  const n = d.schedule.filter(Boolean).length + cardioOf(d).filter(c => c?.type).length;
+  const cardioN = cardioOf(d).filter(c => c?.type).length;
+  const total = d.weekly
+    ? Array.from({ length: weeks }, (_, i) => (d.weekly[i] || NO_DAYS).filter(Boolean).length + cardioN).reduce((a, b) => a + b, 0)
+    : (d.schedule.filter(Boolean).length + cardioN) * weeks;
   const end = /^\d{4}-\d\d-\d\d$/.test(d.start || '') ? addDays(parseDay(d.start), weeks * 7 - 1) : null;
-  return `${plural(n * weeks, 'session')} over ${plural(weeks, 'week')}${end ? ` · ends ${fmtDate(end, { weekday: 'short', month: 'short', day: 'numeric' })}` : ''}`;
+  return `${plural(total, 'session')} over ${plural(weeks, 'week')}${end ? ` · ends ${fmtDate(end, { weekday: 'short', month: 'short', day: 'numeric' })}` : ''}`;
 }
 function viewProgramEditor(id) {
   if (!pdraft || pdraft._for !== id) {
@@ -724,17 +734,17 @@ function viewProgramEditor(id) {
 
     <div class="card" style="margin-top:16px">
       <h2>Weekly schedule</h2>
-      <p class="muted small" style="margin:4px 0 6px">Pick a workout and/or cardio for each day. The same week repeats for the whole program.</p>
+      <p class="muted small" style="margin:4px 0 6px">${d.weekly ? 'This program has different workouts each week (listed below). Cardio days repeat every week.' : 'Pick a workout and/or cardio for each day. The same week repeats for the whole program.'}</p>
       ${DOW.map((day, i) => {
         const c = d.cardio[i];
         return `<div class="pday">
         <b>${DOW_LONG[i]}</b>
         <div class="pday-fields">
-          <label><span>Workout</span><select data-psched="${i}" aria-label="${DOW_LONG[i]} workout">
+          ${d.weekly ? `<div class="muted small" style="align-self:center">Workout changes weekly</div>` : `<label><span>Workout</span><select data-psched="${i}" aria-label="${DOW_LONG[i]} workout">
             <option value="">${c?.type ? 'None' : 'Rest'}</option>
             ${state.templates.map(t => `<option value="${t.id}" ${d.schedule[i] === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
             ${d.schedule[i] && !tplById(d.schedule[i]) ? `<option value="${esc(d.schedule[i])}" selected>Deleted workout</option>` : ''}
-          </select></label>
+          </select></label>`}
           <label><span>Cardio</span><select data-pcardio="${i}.type" aria-label="${DOW_LONG[i]} cardio">
             <option value="">None</option>
             ${CARDIO_TYPES.map(t => `<option ${c?.type === t ? 'selected' : ''}>${t}</option>`).join('')}
@@ -746,6 +756,10 @@ function viewProgramEditor(id) {
         </div>` : ''}
       </div>`;
       }).join('')}
+      ${d.weekly ? `<div class="weekly-list">${Array.from({ length: Math.max(1, parseInt(d.weeks, 10) || 1) }, (_, w) => {
+        const days = (d.weekly[w] || NO_DAYS).map((id, i) => id ? `${DOW[i]} ${esc(tplById(id)?.name || 'Deleted workout')}` : '').filter(Boolean);
+        return `<div><b>Week ${w + 1}</b><span class="muted small">${days.join(' · ') || 'No workouts yet'}</span></div>`;
+      }).join('')}</div>` : ''}
       ${state.templates.length ? '' : `<p class="small" style="color:var(--danger)">You need at least one saved workout to schedule lifting. <a href="#/workouts/new" style="text-decoration:underline">Create one</a>.</p>`}
     </div>
 
@@ -882,7 +896,7 @@ function viewTemplateEditor(id) {
         </div>
         <div class="tfields">
           <label><span>Sets</span><input inputmode="numeric" data-titem="${i}.sets" value="${esc(it.sets)}"></label>
-          <label><span>Reps</span><input data-titem="${i}.reps" value="${esc(it.reps)}" placeholder="8-12"></label>
+          <label><span>${it.timed ? 'Seconds' : 'Reps'}</span><input data-titem="${i}.reps" value="${esc(it.reps)}" placeholder="${it.timed ? '30' : '8-12'}"></label>
           <label><span>${unit()}</span><input inputmode="decimal" data-titem="${i}.weight" value="${esc(it.weight ?? '')}" placeholder="—"></label>
           <label><span>RIR</span><input inputmode="numeric" data-titem="${i}.rir" value="${esc(it.rir ?? '')}" placeholder="—"></label>
           ${linksToNext(draft.items, i)
@@ -892,6 +906,10 @@ function viewTemplateEditor(id) {
                 <option value="" ${it.rest === '' || it.rest == null ? 'selected' : ''}>Default (${restLabel(state.settings.rest)})</option>
                 ${REST_OPTIONS.map(v => `<option value="${v}" ${it.rest !== '' && it.rest != null && +it.rest === v ? 'selected' : ''}>${restLabel(v)}</option>`).join('')}
               </select></label>`}
+        </div>
+        <div class="titem-extra">
+          <button class="link-btn ${it.timed ? 'on' : ''}" data-act="titem-timed" data-i="${i}">${it.timed ? '⏱ Timed (seconds) · tap for reps' : '⏱ Make it timed'}</button>
+          <label class="note-field"><input data-titem="${i}.note" value="${esc(it.note || '')}" placeholder="Note (optional)" aria-label="Note"></label>
         </div>
         ${i < draft.items.length - 1 && (draft.items[i + 1].section || '') === (it.section || '')
           ? `<button class="link-btn ${it.link ? 'on' : ''}" data-act="titem-link" data-i="${i}">${it.link ? '⛓ Superset with next · tap to unlink' : '+ Superset with next'}</button>` : ''}
@@ -954,22 +972,22 @@ function entryCard(en, ei) {
       const reps = repsSummary(en.sets.map(s => s.tr).filter(Boolean)) || en.target;
       const ws = en.sets.map(s => s.tw).filter(w => w !== '' && w != null);
       const parts = [];
-      if (reps) parts.push(`${en.sets.length} × ${esc(reps)} reps`);
+      if (reps) parts.push(en.timed ? `${en.sets.length} × ${esc(parseList(reps).map(fmtSecs).join(', '))}` : `${en.sets.length} × ${esc(reps)} reps`);
       if (en.rir !== '' && en.rir != null) parts.push(`${esc(en.rir)} RIR`);
       if (en.rest !== '' && en.rest != null && !linksToNext(state.active.entries, state.active.entries.indexOf(en))) parts.push(`rest ${restLabel(en.rest)}`);
       if (ws.length && !prev.length) parts.push(`start ${esc(repsSummary(ws.map(fmtW)))} ${unit()}`);
-      return parts.length ? `<div class="muted small">Target ${parts.join(' · ')}</div>` : '';
+      return (parts.length ? `<div class="muted small">Target ${parts.join(' · ')}</div>` : '') + (en.note ? `<div class="entry-note small">${esc(en.note)}</div>` : '');
     })()}
     ${(en.warmups || []).length ? `<div class="warmups"><span class="muted small">Warm-up</span>${en.warmups.map((x, wi) => `<button class="wu ${x.done ? 'on' : ''}" data-act="wu-toggle" data-ei="${ei}" data-wi="${wi}" aria-pressed="${x.done}">${fmtW(x.w)} × ${x.r}</button>`).join('')}</div>` : ''}
     <div class="sets">
-      <div class="set-row ${rc} set-head"><span>Set</span><span>Last time</span><span>${unit()}</span><span>Reps</span>${showRir ? '<span>RIR</span>' : ''}<span></span></div>
+      <div class="set-row ${rc} set-head"><span>Set</span><span>Last time</span><span>${unit()}</span><span>${en.timed ? 'Sec' : 'Reps'}</span>${showRir ? '<span>RIR</span>' : ''}<span></span></div>
       ${en.sets.map((s, si) => {
         const p = prev[si] || prev[prev.length - 1];
         const wPh = p ? fmtW(suggestW(p.w, h)) : (s.tw !== '' && s.tw != null ? fmtW(suggestW(+s.tw, h)) : '');
         const rPh = p ? p.r + (h.rAdd || 0) : (parseInt(s.tr, 10) || targetReps || '');
         return `<div class="set-row ${rc} ${s.done ? 'done' : ''}">
           <span class="set-n">${si + 1}</span>
-          <span class="prev">${prev[si] ? `${fmtW(prev[si].w)} × ${prev[si].r}` : '—'}</span>
+          <span class="prev">${prev[si] ? (en.timed ? `${prev[si].w ? fmtW(prev[si].w) + ' × ' : ''}${fmtSecs(prev[si].r)}` : `${fmtW(prev[si].w)} × ${prev[si].r}`) : '—'}</span>
           <input inputmode="decimal" data-set="${ei}.${si}.w" value="${s.w === '' ? '' : fmtW(s.w)}" placeholder="${wPh}" aria-label="Weight, set ${si + 1}">
           <input inputmode="numeric" data-set="${ei}.${si}.r" value="${s.r}" placeholder="${rPh}" aria-label="Reps, set ${si + 1}">
           ${showRir ? `<input inputmode="numeric" data-set="${ei}.${si}.rir" value="${s.rir ?? ''}" placeholder="${hasRirTarget ? esc(en.rir) : '–'}" aria-label="Reps in reserve, set ${si + 1}">` : ''}
@@ -981,7 +999,7 @@ function entryCard(en, ei) {
       <button class="btn small ghost" data-act="set-add" data-ei="${ei}">+ Add set</button>
       ${en.sets.length > 1 ? `<button class="btn small ghost" data-act="set-remove" data-ei="${ei}">− Remove set</button>` : ''}
       <span class="grow"></span>
-      <button class="btn small ghost" data-act="wu-add" data-ei="${ei}">${(en.warmups || []).length ? 'Clear warm-up' : 'Warm-up'}</button>
+      ${en.timed ? '' : `<button class="btn small ghost" data-act="wu-add" data-ei="${ei}">${(en.warmups || []).length ? 'Clear warm-up' : 'Warm-up'}</button>`}
       ${isBarbell(en.exerciseId) ? `<button class="btn small ghost" data-act="plates" data-ei="${ei}">Plates</button>` : ''}
     </div>
   </section>`;
@@ -1094,7 +1112,7 @@ function viewSession(id) {
     <div class="card" style="margin-top:16px">
       ${grouped(s.entries, en => `<div class="detail-ex">
         <div class="row between"><a href="#/progress/${encodeURIComponent(en.exerciseId)}"><b>${esc(exById(en.exerciseId).name)}</b></a>${prSet.has(en.exerciseId) ? '<span class="badge pr">PR</span>' : ''}</div>
-        <div class="detail-sets">${en.sets.map((x, i) => `<span class="n">${i + 1}</span><span>${x.w ? `${fmtW(x.w)} ${unit()} × ${x.r}` : `${x.r} reps`}${x.rir != null && x.rir !== '' ? ` <span class="muted">@ ${x.rir} RIR</span>` : ''}</span><span class="e">${x.w && x.r ? `≈${fmtW(e1rm(x.w, x.r))} 1RM` : ''}</span>`).join('')}</div>
+        <div class="detail-sets">${en.sets.map((x, i) => `<span class="n">${i + 1}</span><span>${en.timed ? `${x.w ? `${fmtW(x.w)} ${unit()} × ` : ''}${fmtSecs(x.r)}` : x.w ? `${fmtW(x.w)} ${unit()} × ${x.r}` : `${x.r} reps`}${x.rir != null && x.rir !== '' ? ` <span class="muted">@ ${x.rir} RIR</span>` : ''}</span><span class="e">${x.w && x.r ? `≈${fmtW(e1rm(x.w, x.r))} 1RM` : ''}</span>`).join('')}</div>
       </div>`)}
     </div>
     ${s.notes ? `<div class="card" style="margin-top:10px"><div class="muted small" style="margin-bottom:4px">Notes</div>${esc(s.notes).replace(/\n/g, '<br>')}</div>` : ''}
@@ -1338,6 +1356,7 @@ function newEntry(exerciseId, sets = 3, target = '', extra = {}) {
   return {
     id: uid(), exerciseId, target: String(target ?? ''),
     section: extra.section || '', link: !!extra.link, rir: extra.rir ?? '', rest: extra.rest ?? '',
+    ...(extra.timed ? { timed: true } : {}), ...(extra.note ? { note: extra.note } : {}),
     sets: Array.from({ length: +sets || 1 }, (_, i) => ({ w: '', r: '', done: false, tr: t[i]?.tr ?? '', tw: t[i]?.tw ?? '' })),
   };
 }
@@ -1417,7 +1436,7 @@ function startTemplate(tid) {
 function finishWorkout() {
   const a = state.active;
   if (a.cardio) return finishCardio();
-  const kept = a.entries.map(en => ({ exerciseId: en.exerciseId, section: en.section || '', link: !!en.link, sets: en.sets.filter(s => s.done) })).filter(en => en.sets.length);
+  const kept = a.entries.map(en => ({ exerciseId: en.exerciseId, section: en.section || '', link: !!en.link, timed: !!en.timed, sets: en.sets.filter(s => s.done) })).filter(en => en.sets.length);
   if (!kept.length) {
     if (confirm('No sets are ticked off yet. Discard this workout instead?')) { state.active = null; save(); location.hash = '#/today'; }
     return;
@@ -1432,7 +1451,7 @@ function finishWorkout() {
     start: a.start,
     end: Date.now(),
     notes: a.notes.trim(),
-    entries: kept.map(en => ({ exerciseId: en.exerciseId, ...(en.section ? { section: en.section } : {}), ...(en.link ? { link: true } : {}), sets: en.sets.map(s => ({ w: +s.w || 0, r: +s.r || 0, ...(s.rir !== '' && s.rir != null && !isNaN(+s.rir) ? { rir: +s.rir } : {}) })) })),
+    entries: kept.map(en => ({ exerciseId: en.exerciseId, ...(en.section ? { section: en.section } : {}), ...(en.link ? { link: true } : {}), ...(en.timed ? { timed: true } : {}), sets: en.sets.map(s => ({ w: +s.w || 0, r: +s.r || 0, ...(s.rir !== '' && s.rir != null && !isNaN(+s.rir) ? { rir: +s.rir } : {}) })) })),
   };
   session.prs = computePRs(session);
   state.sessions.push(session);
@@ -1557,7 +1576,7 @@ const actions = {
       const [wi, ri] = $$('input', el.closest('.set-row'));
       if (s.w === '' && wi.placeholder !== '') s.w = parseFloat(wi.placeholder);
       if (s.r === '' && ri.placeholder !== '') s.r = parseInt(ri.placeholder, 10);
-      if (s.r === '' || !(s.r > 0)) { s.r = ''; ri.focus(); toast('Enter your reps first'); return; }
+      if (s.r === '' || !(s.r > 0)) { s.r = ''; ri.focus(); toast(en.timed ? 'Enter the time in seconds first' : 'Enter your reps first'); return; }
       if (s.w === '' || isNaN(s.w)) s.w = 0;
       s.done = true;
       const ei = +el.dataset.ei;
@@ -1661,7 +1680,7 @@ const actions = {
     const p = state.programs.find(p => p.id === el.dataset.p);
     const w = +el.dataset.w, d = +el.dataset.d;
     const k = el.dataset.k || 'lift';
-    const label = k === 'cardio' ? (cardioOf(p || {})[d] ? cardioLabel(cardioOf(p)[d]) : 'cardio') : (tplById(p?.schedule[d])?.name || 'workout');
+    const label = k === 'cardio' ? (cardioOf(p || {})[d] ? cardioLabel(cardioOf(p)[d]) : 'cardio') : (tplById(p ? schedFor(p, w)[d] : '')?.name || 'workout');
     if (el.dataset.ask && !confirm(`Start week ${w}, ${DOW_LONG[d]}: ${label} now?`)) return;
     startProgramSlot(el.dataset.p, w, d, k);
   },
@@ -1670,7 +1689,7 @@ const actions = {
     const name = d.name.trim();
     if (!name) { toast('Give your program a name'); $('[data-bind="pdraft.name"]')?.focus(); return; }
     if (!d.start) { toast('Pick a start date'); return; }
-    if (!d.schedule.some(Boolean) && !cardioOf(d).some(c => c?.type)) { toast('Schedule at least one workout or cardio day'); return; }
+    if (!d.schedule.some(Boolean) && !d.weekly?.some(w => w.some(Boolean)) && !cardioOf(d).some(c => c?.type)) { toast('Schedule at least one workout or cardio day'); return; }
     const { _for, makeActive, ...p } = d;
     p.name = name;
     p.weeks = Math.max(1, Math.min(26, parseInt(p.weeks, 10) || 1));
@@ -1711,6 +1730,7 @@ const actions = {
   'titem-move': el => { move(draft.items, +el.dataset.i, +el.dataset.d); render(); },
   'titem-remove': el => { draft.items.splice(+el.dataset.i, 1); render(); },
   'titem-link': el => { const it = draft.items[+el.dataset.i]; it.link = !it.link; render(); },
+  'titem-timed': el => { const it = draft.items[+el.dataset.i]; it.timed = !it.timed; render(); },
   'tpl-section': () => {
     const name = prompt('Section name (e.g. Warm Up, Weights, Finisher)');
     if (!name?.trim()) return;
@@ -1720,7 +1740,7 @@ const actions = {
   'tpl-save': () => { if (saveDraft()) location.hash = '#/workouts'; },
   'tpl-start': () => { const id = saveDraft(); if (id) startTemplate(id); },
   'tpl-delete': () => {
-    const usedIn = state.programs.filter(p => p.schedule.includes(draft.id)).map(p => p.name);
+    const usedIn = state.programs.filter(p => usesTemplate(p, draft.id)).map(p => p.name);
     if (!confirm(`Delete “${draft.name || 'this workout'}”? Your history is kept.${usedIn.length ? `\n\nIt's scheduled in: ${usedIn.join(', ')}. Those days will need a new workout.` : ''}`)) return;
     state.templates = state.templates.filter(t => t.id !== draft.id);
     draft = null; save(); location.hash = '#/workouts';
@@ -1952,15 +1972,15 @@ function bind(el) {
 
 /** A program plus the workouts it schedules, as a shareable file (no history, no personal data). */
 function programFile(p) {
-  const used = [...new Set(p.schedule.filter(Boolean))].map(tplById).filter(Boolean);
+  const used = [...new Set([...p.schedule, ...(p.weekly || []).flat()].filter(Boolean))].map(tplById).filter(Boolean);
   return {
     app: 'setwise', type: 'program', version: 1, unit: unit(),
-    program: { name: p.name, weeks: p.weeks, schedule: p.schedule.map(id => (id && tplById(id) ? id : null)), cardio: cardioOf(p), progType: p.progType, progAmount: p.progAmount, deload: !!p.deload },
+    program: { name: p.name, weeks: p.weeks, schedule: p.schedule.map(id => (id && tplById(id) ? id : null)), ...(p.weekly ? { weekly: p.weekly.map(w => w.map(id => (id && tplById(id) ? id : null))) } : {}), cardio: cardioOf(p), progType: p.progType, progAmount: p.progAmount, deload: !!p.deload },
     templates: used.map(t => ({
       key: t.id, name: t.name,
       items: t.items.map(it => {
         const ex = exById(it.exerciseId);
-        return { exercise: { name: ex.name, muscle: ex.muscle, equipment: ex.equipment }, sets: it.sets, reps: it.reps ?? '', weight: it.weight ?? '', rir: it.rir ?? '', rest: it.rest ?? '', section: it.section || '', link: !!it.link };
+        return { exercise: { name: ex.name, muscle: ex.muscle, equipment: ex.equipment }, sets: it.sets, reps: it.reps ?? '', weight: it.weight ?? '', rir: it.rir ?? '', rest: it.rest ?? '', section: it.section || '', link: !!it.link, ...(it.timed ? { timed: true } : {}), ...(it.note ? { note: it.note } : {}) };
       }),
     })),
   };
@@ -1979,10 +1999,13 @@ function importProgramData(data) {
   if (data.unit && data.unit !== unit() && confirm(`This program's weights are in ${data.unit}. Switch the app to ${data.unit}?\n\n(Labels only — existing numbers aren't converted.)`)) state.settings.unit = data.unit;
   const ids = {};
   for (const t of data.templates) {
+    // "reuse": use a workout of the same name that's already here (keeps its history and any edits).
+    const existing = t.reuse && state.templates.find(x => x.name.trim().toLowerCase() === String(t.name || '').trim().toLowerCase());
+    if (existing) { ids[t.key] = existing.id; continue; }
     const items = (t.items || []).map(it => {
       const e = it.exercise || {};
       const ex = state.exercises.find(x => x.name.toLowerCase() === String(e.name || '').toLowerCase()) || createExercise(String(e.name || 'Exercise'), MUSCLES.includes(e.muscle) ? e.muscle : 'Other', EQUIPMENT.includes(e.equipment) ? e.equipment : 'Other');
-      return { exerciseId: ex.id, sets: Math.max(1, Math.min(20, parseInt(it.sets, 10) || 1)), reps: String(it.reps ?? ''), weight: String(it.weight ?? ''), rir: String(it.rir ?? ''), rest: it.rest === '' || it.rest == null ? '' : +it.rest, section: String(it.section || ''), link: !!it.link };
+      return { exerciseId: ex.id, sets: Math.max(1, Math.min(20, parseInt(it.sets, 10) || 1)), reps: String(it.reps ?? ''), weight: String(it.weight ?? ''), rir: String(it.rir ?? ''), rest: it.rest === '' || it.rest == null ? '' : +it.rest, section: String(it.section || ''), link: !!it.link, ...(it.timed ? { timed: true } : {}), ...(it.note ? { note: String(it.note) } : {}) };
     });
     const tpl = { id: uid(), name: uniqueName(String(t.name || 'Workout'), state.templates), items };
     state.templates.push(tpl);
@@ -1993,15 +2016,16 @@ function importProgramData(data) {
   const prog = {
     id: uid(), name: uniqueName(String(p.name || 'Program'), state.programs),
     weeks: Math.max(1, Math.min(26, parseInt(p.weeks, 10) || 4)),
-    start: dayKey(startOfWeek(addDays(new Date(), 7))), // next Monday — change it in Edit
+    start: /^\d{4}-\d\d-\d\d$/.test(p.start || '') ? p.start : dayKey(startOfWeek(addDays(new Date(), 7))), // else next Monday — change it in Edit
     schedule: Array.from({ length: 7 }, (_, i) => (p.schedule?.[i] && ids[p.schedule[i]]) || ''),
+    ...(Array.isArray(p.weekly) ? { weekly: p.weekly.slice(0, 26).map(w => Array.from({ length: 7 }, (_, i) => (w?.[i] && ids[w[i]]) || '')) } : {}),
     cardio: Array.from({ length: 7 }, (_, i) => (cardio[i]?.type && CARDIO_TYPES.includes(cardio[i].type) ? { type: cardio[i].type, minutes: parseInt(cardio[i].minutes, 10) || '', intensity: INTENSITIES.includes(cardio[i].intensity) ? cardio[i].intensity : INTENSITIES[0] } : null)),
     progType: ['weight', 'reps', 'none'].includes(p.progType) ? p.progType : 'none',
     progAmount: Math.max(0, parseFloat(p.progAmount) || 0),
     deload: !!p.deload,
   };
   state.programs.push(prog);
-  if (!activeProgram()) state.programId = prog.id;
+  if (!activeProgram() || (p.makeActive && confirm(`Make “${prog.name}” your active program? It replaces “${activeProgram().name}” on your Today screen.`))) state.programId = prog.id;
   save();
   return prog;
 }

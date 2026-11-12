@@ -426,3 +426,12 @@ a.badge { text-decoration: none; }
 .earlier { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
 .earlier summary { cursor: pointer; color: var(--muted); font-weight: 600; }
 .earlier-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px dashed var(--border); }
+
+/* Per-week programs, timed sets, exercise notes */
+.weekly-list { display: grid; gap: 8px; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.weekly-list > div { display: flex; flex-direction: column; gap: 2px; }
+.entry-note { margin-top: 4px; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); color: var(--muted); }
+.titem-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.titem-extra .link-btn { margin: 0; }
+.note-field { flex: 1; min-width: 160px; }
+.note-field input { width: 100%; }
