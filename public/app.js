@@ -58,7 +58,7 @@ function defaultState() {
     active: null,
     lastBackup: null,   // when "Export backup" was last used
     backupSnooze: null, // reminder hidden until this time
-    settings: { unit: 'kg', rest: 90, autoRest: true, keepAwake: true, logRir: false, bar: '' },
+    settings: { unit: 'kg', rest: 90, autoRest: true, keepAwake: true, logRir: false, bar: '', celebrate: true },
   };
 }
 
@@ -217,7 +217,7 @@ const exById = id => state.exercises.find(e => e.id === id) || { id, name: 'Unkn
 const unit = () => state.settings.unit;
 
 // ---------- Derived data ----------
-const sessionVolume = s => s.entries.reduce((a, en) => a + en.sets.reduce((b, x) => b + (x.w || 0) * (x.r || 0), 0), 0);
+const sessionVolume = s => s.entries.reduce((a, en) => en.timed ? a : a + en.sets.reduce((b, x) => b + (x.w || 0) * (x.r || 0), 0), 0);
 const sessionSetCount = s => s.entries.reduce((a, en) => a + en.sets.length, 0);
 const sortedSessions = () => [...state.sessions].sort((a, b) => b.start - a.start);
 
@@ -270,6 +270,96 @@ function computePRs(session) {
   return prs;
 }
 const prCount = s => new Set((s.prs || []).map(p => p.exerciseId)).size;
+
+// ---------- Fun comparisons ----------
+// [singular, plural, emoji, typical weight in lb]
+const ANIMALS = [
+  ['cat', 'cats', '🐱', 10], ['corgi', 'corgis', '🐶', 28], ['koala', 'koalas', '🐨', 20], ['penguin', 'emperor penguins', '🐧', 75],
+  ['golden retriever', 'golden retrievers', '🦮', 65], ['kangaroo', 'kangaroos', '🦘', 150], ['ostrich', 'ostriches', '🦤', 230],
+  ['giant panda', 'giant pandas', '🐼', 220], ['lion', 'lions', '🦁', 420], ['gorilla', 'gorillas', '🦍', 360],
+  ['grizzly bear', 'grizzly bears', '🐻', 600], ['moose', 'moose', '🫎', 1000], ['horse', 'horses', '🐴', 1100],
+  ['polar bear', 'polar bears', '🐻‍❄️', 1000], ['bison', 'bison', '🦬', 1800], ['giraffe', 'giraffes', '🦒', 2600],
+  ['hippo', 'hippos', '🦛', 3300], ['rhino', 'rhinos', '🦏', 5000], ['T. rex', 'T. rexes', '🦖', 15000],
+  ['African elephant', 'African elephants', '🐘', 13000], ['blue whale', 'blue whales', '🐋', 300000],
+];
+const LB_PER_KG = 2.20462;
+/** "about 34 ostriches 🦤" — picks an animal that gives a satisfying number (varies between workouts). */
+function animalCompare(total) {
+  const lb = unit() === 'kg' ? total * LB_PER_KG : total;
+  if (!(lb > 0)) return null;
+  const fits = ANIMALS.filter(a => lb / a[3] >= 2 && lb / a[3] <= 60);
+  const a = fits.length ? fits[Math.floor(Math.random() * fits.length)]
+    : lb < 20 ? ANIMALS[0] : ANIMALS[ANIMALS.length - 1];
+  const n = lb / a[3];
+  const count = n >= 10 ? Math.round(n) : Math.round(n * 10) / 10;
+  return { emoji: a[2], text: `about ${count.toLocaleString()} ${count === 1 ? a[0] : a[1]}` };
+}
+/** Days in a row (ending today) with at least one finished session. */
+function dayStreak() {
+  const days = new Set(state.sessions.filter(x => !x.sample).map(x => dayKey(x.start)));
+  let n = 0; const d = new Date();
+  while (days.has(dayKey(d))) { n++; d.setDate(d.getDate() - 1); }
+  return n;
+}
+const MILESTONES = [1, 5, 10, 25, 50, 75, 100, 150, 200, 250, 300, 365, 400, 500, 750, 1000];
+const CHEERS = ['Crushed it!', 'Strong work!', 'That’s a wrap!', 'Beast mode: complete', 'Another one in the bank!', 'You showed up. That’s the win.', 'Look at you go!', 'Future you says thanks!'];
+const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th');
+
+function celebrate(session) {
+  if (state.settings.celebrate === false) return;
+  const real = state.sessions.filter(x => !x.sample);
+  const count = real.length;
+  const vol = sessionVolume(session);
+  const animal = animalCompare(vol);
+  const lifetime = real.reduce((a, x) => a + sessionVolume(x), 0);
+  const lifeAnimal = animalCompare(lifetime);
+  const streak = dayStreak();
+  const prs = prCount(session);
+  const sets = session.entries.reduce((a, e) => a + e.sets.length, 0);
+  const mins = Math.max(1, Math.round((session.end - session.start) / 60000));
+  const facts = [];
+  if (session.cardio) {
+    const m = session.cardio.minutes || mins;
+    facts.push(['🎧', `${plural(m, 'minute')}: about ${plural(Math.max(1, Math.round(m / 3.5)), 'song')}’ worth`]);
+    if (/stair/i.test(session.cardio.type)) {
+      const floors = Math.round(m * 60 / 16); // ~60 steps a minute, ~16 steps a floor
+      facts.push(['🏙️', `Roughly ${floors} floors${floors >= 102 ? `, about ${Math.round(floors / 102 * 10) / 10} Empire State Buildings` : ''}`]);
+    }
+    if (session.cardio.distance) facts.push(['📍', `${fmtW(session.cardio.distance)} ${session.cardio.distUnit || distUnit()} covered`]);
+  } else {
+    if (prs) facts.push(['🏆', `${plural(prs, 'new personal record')}`]);
+    facts.push(['💪', `${plural(sets, 'set')} in ${fmtDuration(Math.max(60000, session.end - session.start))}`]);
+  }
+  if (streak >= 2) facts.push(['🔥', `${streak}-day streak`]);
+  if (MILESTONES.includes(count)) facts.push(['🎉', count === 1 ? 'Your first workout in Setwise!' : `Your ${ordinal(count)} workout!`]);
+  if (!session.cardio && lifetime > vol && lifeAnimal) facts.push(['📈', `All-time: ${compact(lifetime)} ${unit()}, ${lifeAnimal.text} ${lifeAnimal.emoji}`]);
+  const headline = session.cardio ? `${session.cardio.type} done!` : CHEERS[Math.floor(Math.random() * CHEERS.length)];
+  const shareText = session.cardio
+    ? `Just finished ${session.cardio.minutes || mins} min of ${session.cardio.type} in Setwise! 💪`
+    : `Just lifted ${Math.round(vol).toLocaleString()} ${unit()} (${animal ? animal.text + ' ' + animal.emoji : 'a lot'}) in Setwise! 💪`;
+  openModal(`<div class="sheet celebrate" role="dialog" aria-modal="true" aria-label="Workout complete">
+    <div class="confetti" aria-hidden="true">${confettiHTML()}</div>
+    <div class="cel-hero">${session.cardio ? '🏅' : (animal?.emoji || '🏅')}</div>
+    <h2 class="cel-title">${esc(headline)}</h2>
+    ${!session.cardio && vol > 0 ? `<p class="cel-big">You lifted <b>${Math.round(vol).toLocaleString()} ${unit()}</b></p>
+      <p class="cel-sub">That’s ${animal.text}!</p>` : session.cardio ? `<p class="cel-big"><b>${plural(session.cardio.minutes || mins, 'minute')}</b> of ${esc(session.cardio.type.toLowerCase())}</p>` : `<p class="cel-big">Workout saved</p>`}
+    <ul class="cel-facts">${facts.map(([icon, text]) => `<li><span>${icon}</span>${esc(text)}</li>`).join('')}</ul>
+    <div class="btn-row">
+      <button class="btn primary" data-act="close-modal">Done</button>
+      ${navigator.share ? `<button class="btn" data-act="cel-share" data-text="${esc(shareText)}">Share</button>` : ''}
+    </div>
+  </div>`);
+  try { navigator.vibrate?.([30, 40, 30, 40, 60]); } catch (e) { /* not supported */ }
+}
+function confettiHTML() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return '';
+  const colors = ['#0d9b63', '#f5b700', '#ff5d73', '#4c8dff', '#a66cff', '#ff9f1c'];
+  return Array.from({ length: 70 }, (_, i) => {
+    const left = Math.random() * 100, delay = Math.random() * 0.6, dur = 1.8 + Math.random() * 1.6;
+    const size = 6 + Math.random() * 7, rot = Math.floor(Math.random() * 360), drift = Math.round(Math.random() * 80 - 40);
+    return `<i style="left:${left}%;width:${size}px;height:${size * 0.45}px;background:${colors[i % colors.length]};animation-delay:${delay}s;animation-duration:${dur}s;--r:${rot}deg;--dx:${drift}px"></i>`;
+  }).join('');
+}
 /** Recompute PRs for every session (oldest first), e.g. after editing an old workout. */
 function recomputeAllPRs() {
   [...state.sessions].sort((a, b) => a.start - b.start).forEach(x => { if (!x.cardio) x.prs = computePRs(x); });
@@ -611,7 +701,7 @@ function viewToday() {
 
     <div class="stats" style="margin-top:16px">
       <div class="stat"><b>${week.length}</b><span>workouts this week</span></div>
-      <div class="stat"><b>${compact(week.reduce((a, s) => a + sessionVolume(s), 0))}</b><span>${unit()} lifted this week</span></div>
+      <div class="stat"><b>${compact(week.reduce((a, s) => a + sessionVolume(s), 0))}</b><span>${unit()} lifted this week${(() => { const a = animalCompare(week.reduce((x, s) => x + sessionVolume(s), 0)); return a ? `<br>≈ ${a.emoji} ${esc(a.text.replace(/^about /, ''))}` : ''; })()}</span></div>
       <div class="stat"><b>${weekStreak()}</b><span>week streak</span></div>
     </div>
 
@@ -1270,6 +1360,8 @@ function viewSettings() {
         <input type="checkbox" class="switch" data-bind="settings.keepAwake" ${s.keepAwake !== false ? 'checked' : ''} aria-label="Keep screen on during workouts"></div>
       <div class="setting"><div><b>Log RIR for every exercise</b><p>Adds a reps-in-reserve column to each set. Exercises with an RIR target always show it.</p></div>
         <input type="checkbox" class="switch" data-bind="settings.logRir" ${s.logRir ? 'checked' : ''} aria-label="Log RIR for every exercise"></div>
+      <div class="setting"><div><b>Celebrate finished workouts</b><p>Confetti, what you lifted in animals, streaks and milestones.</p></div>
+        <input type="checkbox" class="switch" data-bind="settings.celebrate" ${s.celebrate !== false ? 'checked' : ''} aria-label="Celebrate finished workouts"></div>
       <div class="setting"><div><b>Auto-start rest timer</b><p>When you tick off a set.</p></div>
         <input type="checkbox" class="switch" data-bind="settings.autoRest" ${s.autoRest ? 'checked' : ''} aria-label="Auto-start rest timer"></div>
     </div>
@@ -1397,7 +1489,8 @@ function finishCardio() {
   save();
   if (!storagePersisted) protectStorage();
   location.hash = '#/history/' + session.id;
-  toast(`${c.type} logged — ${minutes} min. Nice work!`);
+  if (state.settings.celebrate === false) toast(`${c.type} logged — ${minutes} min. Nice work!`);
+  setTimeout(() => celebrate(session), 80);
 }
 function viewCardioLog() {
   const a = state.active, c = a.cardio, tg = c.target || {};
@@ -1459,7 +1552,8 @@ function finishWorkout() {
   save();
   if (!storagePersisted) protectStorage();
   location.hash = '#/history/' + session.id;
-  toast(prCount(session) ? `Workout saved — PRs on ${plural(prCount(session), 'exercise')}! 🏆` : 'Workout saved. Nice work!');
+  if (state.settings.celebrate === false) toast(prCount(session) ? `Workout saved — PRs on ${plural(prCount(session), 'exercise')}! 🏆` : 'Workout saved. Nice work!');
+  setTimeout(() => celebrate(session), 80);
 }
 
 // ---------- Rest timer ----------
@@ -1802,6 +1896,7 @@ const actions = {
     save(); render(); toast('Backup saved: keep the file somewhere safe');
   },
   'move-home': () => moveHome(),
+  'cel-share': el => { navigator.share?.({ text: el.dataset.text }).catch(() => {}); },
   'import-merge': () => {
     const c = mergeInto(pendingImport); pendingImport = null;
     save(); closeModal(); render();

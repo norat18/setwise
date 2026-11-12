@@ -435,3 +435,26 @@ a.badge { text-decoration: none; }
 .titem-extra .link-btn { margin: 0; }
 .note-field { flex: 1; min-width: 160px; }
 .note-field input { width: 100%; }
+
+/* Finish-workout celebration */
+.celebrate { position: relative; overflow: hidden; text-align: center; padding-top: 26px; }
+.cel-hero { font-size: 64px; line-height: 1; animation: pop .6s cubic-bezier(.2, 1.6, .4, 1) both; }
+.cel-title { margin: 10px 0 4px; font-size: 24px; }
+.cel-big { margin: 6px 0 0; font-size: 18px; }
+.cel-big b { color: var(--accent); }
+.cel-sub { margin: 2px 0 0; color: var(--muted); }
+.cel-facts { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 8px; text-align: left; }
+.cel-facts li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-weight: 600; animation: rise .4s ease both; }
+.cel-facts li:nth-child(2) { animation-delay: .08s; } .cel-facts li:nth-child(3) { animation-delay: .16s; }
+.cel-facts li:nth-child(4) { animation-delay: .24s; } .cel-facts li:nth-child(5) { animation-delay: .32s; }
+.cel-facts li span { font-size: 20px; }
+.celebrate .btn-row { position: relative; z-index: 1; }
+.confetti { position: absolute; inset: 0; pointer-events: none; }
+.confetti i { position: absolute; top: -12px; border-radius: 2px; opacity: 0; animation: confetti-fall linear forwards; }
+@keyframes confetti-fall {
+  0% { opacity: 1; transform: translate(0, 0) rotate(var(--r)); }
+  100% { opacity: 0; transform: translate(var(--dx), 560px) rotate(calc(var(--r) + 540deg)); }
+}
+@keyframes pop { from { transform: scale(.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .cel-hero, .cel-facts li { animation: none; } }
